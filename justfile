@@ -20,7 +20,7 @@ dkc:
 _macos:
     @[ "$(uname)" = Darwin ] || { echo "error: run this recipe on the macOS host, not in the dkc container" >&2; exit 1; }
 
-# Builds and ad-hoc signs .build/Notely.app without launching it
+# Builds and ad-hoc signs Notely.app without launching it
 build: _macos
     swift build -c release
     rm -rf {{app}}
