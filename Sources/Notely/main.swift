@@ -99,7 +99,7 @@ struct NoteView: View {
 /// is key, so it gives the note working edit shortcuts and Cmd+Q.
 func makeMainMenu() -> NSMenu {
     let appMenu = NSMenu()
-    appMenu.addItem(withTitle: "Quit FloatingWidget",
+    appMenu.addItem(withTitle: "Quit Notely",
                     action: #selector(NSApplication.terminate(_:)),
                     keyEquivalent: "q")
 
@@ -163,11 +163,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         let image = NSImage(systemSymbolName: "note.text",
-                            accessibilityDescription: "FloatingWidget")
+                            accessibilityDescription: "Notely")
         image?.isTemplate = true
         statusItem.button?.image = image
         let statusMenu = NSMenu()
-        statusMenu.addItem(withTitle: "Quit FloatingWidget",
+        statusMenu.addItem(withTitle: "Quit Notely",
                            action: #selector(NSApplication.terminate(_:)),
                            keyEquivalent: "q")
         statusItem.menu = statusMenu

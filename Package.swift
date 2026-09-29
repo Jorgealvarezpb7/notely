@@ -2,9 +2,9 @@
 import PackageDescription
 
 let package = Package(
-    name: "FloatingWidget",
+    name: "Notely",
     platforms: [.macOS(.v13)],
     targets: [
-        .executableTarget(name: "FloatingWidget", path: "Sources/FloatingWidget")
+        .executableTarget(name: "Notely", path: "Sources/Notely")
     ]
 )
