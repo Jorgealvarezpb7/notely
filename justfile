@@ -20,13 +20,27 @@ dkc:
 _macos:
     @[ "$(uname)" = Darwin ] || { echo "error: run this recipe on the macOS host, not in the dkc container" >&2; exit 1; }
 
+# Builds .build/AppIcon.icns from Packaging/AppIcon.png at every standard size
+_icon: _macos
+    #!/usr/bin/env bash
+    set -euo pipefail
+    iconset=.build/AppIcon.iconset
+    rm -rf "$iconset"
+    mkdir -p "$iconset"
+    for size in 16 32 128 256 512; do
+        sips -z "$size" "$size" Packaging/AppIcon.png --out "$iconset/icon_${size}x${size}.png" >/dev/null
+        sips -z $((size * 2)) $((size * 2)) Packaging/AppIcon.png --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+    done
+    iconutil -c icns "$iconset" -o .build/AppIcon.icns
+
 # Builds and ad-hoc signs Notely.app without launching it
-build: _macos
+build: _macos _icon
     swift build -c release
     rm -rf {{app}}
-    mkdir -p {{app}}/Contents/MacOS
+    mkdir -p {{app}}/Contents/MacOS {{app}}/Contents/Resources
     cp .build/release/Notely {{app}}/Contents/MacOS/Notely
     cp Packaging/Info.plist {{app}}/Contents/Info.plist
+    cp .build/AppIcon.icns {{app}}/Contents/Resources/AppIcon.icns
     codesign --force --sign - {{app}}
     codesign --verify {{app}}
 
@@ -51,6 +65,9 @@ install: build
     mkdir -p ~/Applications
     rm -rf ~/Applications/Notely.app
     ditto {{app}} ~/Applications/Notely.app
+    # Refresh the modification date so Finder and the Dock pick up the
+    # new icon instead of a cached one.
+    touch ~/Applications/Notely.app
 
 # Installs and opens Notely
 run: install

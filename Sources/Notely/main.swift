@@ -1,12 +1,15 @@
 import AppKit
 import SwiftUI
 
-/// One note: its text and, once the panel has been moved at least once,
-/// its saved panel position in `NSStringFromPoint` form.
+/// One note: its text and, once the window has been moved or resized,
+/// its saved window position in `NSStringFromPoint` form and its saved
+/// window size in `NSStringFromSize` form. Both are optional, so notes
+/// saved by earlier versions still decode.
 struct Note: Codable, Identifiable {
     let id: UUID
     var text: String
     var origin: String?
+    var size: String?
 }
 
 /// Holds every note and keeps `UserDefaults` in sync on every change, the
@@ -27,7 +30,7 @@ final class NoteStore: ObservableObject {
             // the data is bad) falls back to one empty note.
             let decoded = (try? JSONDecoder().decode([Note].self, from: data)) ?? []
             if decoded.isEmpty {
-                notes = [Note(id: UUID(), text: "", origin: nil)]
+                notes = [Note(id: UUID(), text: "", origin: nil, size: nil)]
                 save()
             } else {
                 notes = decoded
@@ -37,7 +40,7 @@ final class NoteStore: ObservableObject {
             // into one note, then remove them.
             let text = defaults.string(forKey: Self.legacyTextKey) ?? ""
             let origin = defaults.string(forKey: Self.legacyOriginKey)
-            notes = [Note(id: UUID(), text: text, origin: origin)]
+            notes = [Note(id: UUID(), text: text, origin: origin, size: nil)]
             defaults.removeObject(forKey: Self.legacyTextKey)
             defaults.removeObject(forKey: Self.legacyOriginKey)
             save()
@@ -60,9 +63,16 @@ final class NoteStore: ObservableObject {
         save()
     }
 
+    func setFrame(origin: String, size: String, for id: UUID) {
+        guard let index = notes.firstIndex(where: { $0.id == id }) else { return }
+        notes[index].origin = origin
+        notes[index].size = size
+        save()
+    }
+
     @discardableResult
-    func add(origin: String?) -> Note {
-        let note = Note(id: UUID(), text: "", origin: origin)
+    func add(origin: String?, size: String?) -> Note {
+        let note = Note(id: UUID(), text: "", origin: origin, size: size)
         notes.append(note)
         save()
         return note
@@ -79,13 +89,10 @@ final class NoteStore: ObservableObject {
     }
 }
 
-/// NSPanel subclass that can accept keyboard focus while staying a
-/// non-activating panel: the app never becomes active, but the panel's
-/// text view can become first responder and receive keystrokes.
-final class NotePanel: NSPanel {
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { false }
-
+/// A note's window: a titled, resizable window whose title bar is
+/// transparent and hidden, so the note keeps its own look while getting
+/// native resizing, corners, and shadow.
+final class NoteWindow: NSWindow {
     /// Esc sends `cancelOperation(_:)` up the responder chain from a
     /// focused NSTextView. Resign first responder to end editing while
     /// keeping the note text.
@@ -94,9 +101,9 @@ final class NotePanel: NSPanel {
     }
 }
 
-/// Thin header strip that drags the panel on mouseDown. TextEditor
+/// Thin header strip that drags the window on mouseDown. TextEditor
 /// consumes mouseDown itself (for text selection), so dragging by the
-/// window background alone cannot work once the note fills the panel;
+/// window background alone cannot work once the note fills the window;
 /// this strip gives an explicit, visible drag target instead.
 struct DragHandle: NSViewRepresentable {
     final class DragView: NSView {
@@ -122,7 +129,7 @@ struct StripButton: NSViewRepresentable {
 
     /// Reuses the standard close button's natural size purely as a sizing
     /// constant; the button itself is never shown. Keeps the strip height
-    /// and button hit targets the same as when the panel had a close button.
+    /// and button hit targets the same as when the window had a close button.
     static let referenceSize = NSWindow.standardWindowButton(.closeButton, for: [.titled, .closable])!.frame.size
 
     let symbolName: String
@@ -172,7 +179,7 @@ struct NoteView: View {
     var body: some View {
         VStack(spacing: 4) {
             // The buttons sit on top of the drag handle, so clicks on
-            // them never start a panel drag.
+            // them never start a window drag.
             ZStack {
                 DragHandle()
                     .overlay(
@@ -207,21 +214,23 @@ struct NoteView: View {
             }
         }
         .padding(12)
-        .frame(width: 220, height: 150)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22))
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.ultraThinMaterial)
+        // Fill the transparent title bar too, so the drag strip sits at
+        // the top edge of the window as before.
+        .ignoresSafeArea()
     }
 }
 
-/// Main menu that the menu bar never shows, because the app never becomes
-/// active. AppKit still checks it for Cmd key equivalents while a panel
-/// is key, so it gives every note working edit shortcuts and Cmd+Q.
+/// Main menu the menu bar shows while the app is active. It gives every
+/// note working edit shortcuts and Cmd+Q.
 func makeMainMenu() -> NSMenu {
     let appMenu = NSMenu()
     appMenu.addItem(withTitle: "Quit Notely",
                     action: #selector(NSApplication.terminate(_:)),
                     keyEquivalent: "q")
 
-    // Actions with no target go to the first responder: the key panel's
+    // Actions with no target go to the first responder: the key window's
     // note text view.
     let editMenu = NSMenu(title: "Edit")
     editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
@@ -245,28 +254,55 @@ func makeMainMenu() -> NSMenu {
 }
 
 /// Moves `frame` the shortest distance (x and y only) to sit fully inside
-/// `screen`. Shared by `restoredOrigin` (relaunch) and `addNote` (a new
-/// note placed near its source panel), so both use the same rule.
+/// `screen`. Shared by `restoredFrame` (relaunch) and `addNote` (a new
+/// note placed near its source window), so both use the same rule.
 func clamp(_ frame: NSRect, into screen: NSRect) -> NSPoint {
     NSPoint(x: min(max(frame.minX, screen.minX), screen.maxX - frame.width),
            y: min(max(frame.minY, screen.minY), screen.maxY - frame.height))
 }
 
-/// Where to open a panel from a saved `NSStringFromPoint` origin: the
-/// saved frame moved the shortest distance to fit fully inside the screen
-/// it overlaps most. Returns `nil` when nothing usable is saved or the
-/// saved frame is on no screen, so the caller uses the default position.
-func restoredOrigin(saved: String?, size: NSSize, screens: [NSRect]) -> NSPoint? {
-    // NSPointFromString returns .zero for unparsable text, which is also a
-    // valid origin, so parse the "{x, y}" form explicitly.
+/// Smallest size a note window can have: room for the drag strip and one
+/// line of text.
+let minimumNoteSize = NSSize(width: 160, height: 100)
+
+/// Size of a note with no saved size.
+let defaultNoteSize = NSSize(width: 220, height: 150)
+
+/// Parses the "{a, b}" form written by `NSStringFromPoint` and
+/// `NSStringFromSize`. Their `...FromString` counterparts return .zero for
+/// unparsable text, which is indistinguishable from a real value.
+func parsePair(_ saved: String?) -> (Double, Double)? {
     guard let saved else { return nil }
     let numbers = saved
         .trimmingCharacters(in: CharacterSet(charactersIn: "{} "))
         .split(separator: ",")
         .compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
     guard numbers.count == 2 else { return nil }
+    return (numbers[0], numbers[1])
+}
 
-    let frame = NSRect(origin: NSPoint(x: numbers[0], y: numbers[1]), size: size)
+/// A saved `NSStringFromSize` size, or the default size when nothing
+/// usable is saved.
+func savedSize(_ saved: String?) -> NSSize {
+    guard let pair = parsePair(saved) else { return defaultNoteSize }
+    return NSSize(width: pair.0, height: pair.1)
+}
+
+/// `size` capped at `screen`'s size and floored at the minimum note size.
+func fit(_ size: NSSize, into screen: NSRect) -> NSSize {
+    NSSize(width: max(min(size.width, screen.width), minimumNoteSize.width),
+           height: max(min(size.height, screen.height), minimumNoteSize.height))
+}
+
+/// Where to open a window from a saved `NSStringFromPoint` origin: the
+/// saved frame, shrunk to fit and then moved the shortest distance to sit
+/// fully inside the screen it overlaps most. Returns `nil` when nothing
+/// usable is saved or the saved frame is on no screen, so the caller uses
+/// the default position.
+func restoredFrame(saved: String?, size: NSSize, screens: [NSRect]) -> NSRect? {
+    guard let pair = parsePair(saved) else { return nil }
+
+    let frame = NSRect(origin: NSPoint(x: pair.0, y: pair.1), size: size)
     func overlap(_ screen: NSRect) -> CGFloat {
         let common = screen.intersection(frame)
         return common.isNull ? 0 : common.width * common.height
@@ -274,7 +310,9 @@ func restoredOrigin(saved: String?, size: NSSize, screens: [NSRect]) -> NSPoint?
     guard let screen = screens.max(by: { overlap($0) < overlap($1) }),
           overlap(screen) > 0 else { return nil }
 
-    return clamp(frame, into: screen)
+    let fitted = fit(size, into: screen)
+    let origin = clamp(NSRect(origin: frame.origin, size: fitted), into: screen)
+    return NSRect(origin: origin, size: fitted)
 }
 
 private extension NSView {
@@ -290,128 +328,158 @@ private extension NSView {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
-    private static let panelSize = NSSize(width: 220, height: 150)
-
     let store = NoteStore()
-    var panels: [UUID: NotePanel] = [:]
-    /// Held strongly: a released status item disappears from the menu bar.
-    var statusItem: NSStatusItem!
+    var windows: [UUID: NoteWindow] = [:]
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = makeMainMenu()
 
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        let image = NSImage(systemSymbolName: "note.text",
-                            accessibilityDescription: "Notely")
-        image?.isTemplate = true
-        statusItem.button?.image = image
-        let statusMenu = NSMenu()
-        statusMenu.addItem(withTitle: "Quit Notely",
-                           action: #selector(NSApplication.terminate(_:)),
-                           keyEquivalent: "q")
-        statusItem.menu = statusMenu
-
         for note in store.notes {
-            openPanel(for: note)
+            openWindow(for: note)
         }
     }
 
-    private func defaultOrigin(size: NSSize) -> NSPoint {
-        guard let frame = NSScreen.main?.visibleFrame else { return .zero }
-        return NSPoint(x: frame.maxX - size.width - 20,
-                       y: frame.maxY - size.height - 20)
+    /// Clicking the Dock icon brings every note window to the front.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        for window in windows.values {
+            window.orderFront(nil)
+        }
+        return true
     }
 
     @discardableResult
-    private func openPanel(for note: Note) -> NotePanel {
-        let size = Self.panelSize
-        let panel = NotePanel(
-            contentRect: NSRect(origin: .zero, size: size),
-            styleMask: [.borderless, .nonactivatingPanel],
+    private func openWindow(for note: Note) -> NoteWindow {
+        let size = savedSize(note.size)
+        let frame: NSRect
+        if let restored = restoredFrame(saved: note.origin, size: size,
+                                        screens: NSScreen.screens.map(\.visibleFrame)) {
+            frame = restored
+        } else {
+            // Default position: 20 points from the top and right edges of
+            // the main screen's visible area.
+            let screen = NSScreen.main?.visibleFrame ?? NSRect(origin: .zero, size: size)
+            let fitted = fit(size, into: screen)
+            frame = NSRect(x: screen.maxX - fitted.width - 20,
+                           y: screen.maxY - fitted.height - 20,
+                           width: fitted.width, height: fitted.height)
+        }
+
+        let window = NoteWindow(
+            contentRect: frame,
+            styleMask: [.titled, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
-        panel.contentView = NSHostingView(rootView: NoteView(
+        // The dictionary owns the window; without this, `close()` would
+        // release it a second time.
+        window.isReleasedWhenClosed = false
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            window.standardWindowButton(button)?.isHidden = true
+        }
+
+        let hostingView = NSHostingView(rootView: NoteView(
             store: store,
             id: note.id,
             onAdd: { [weak self] in self?.addNote(after: note.id) },
             onRemove: { [weak self] in self?.removeNote(note.id) }
         ))
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = true
-        panel.level = .floating
+        // The window alone owns its size; SwiftUI's preferred size must
+        // not pin it.
+        hostingView.sizingOptions = []
+        window.contentView = hostingView
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = true
         // The drag handle performs dragging explicitly; disable
         // background-drag so it doesn't fight the text editor's own
-        // mouse handling elsewhere in the panel.
-        panel.isMovableByWindowBackground = false
-        panel.collectionBehavior = [.canJoinAllSpaces, .stationary]
+        // mouse handling elsewhere in the window.
+        window.isMovableByWindowBackground = false
+        window.minSize = minimumNoteSize
+        // `contentRect` may be adjusted for the title bar; set the frame
+        // itself so the saved size is the frame size.
+        window.setFrame(frame, display: false)
 
-        if let origin = restoredOrigin(saved: note.origin, size: size,
-                                       screens: NSScreen.screens.map(\.visibleFrame)) {
-            panel.setFrameOrigin(origin)
-        } else {
-            panel.setFrameOrigin(defaultOrigin(size: size))
-        }
-        // Set after positioning, so opening a panel never saves an origin
+        // Set after positioning, so opening a window never saves a frame
         // the user did not choose.
-        panel.delegate = self
-        panels[note.id] = panel
-        panel.orderFrontRegardless()
-        return panel
+        window.delegate = self
+        windows[note.id] = window
+        window.orderFrontRegardless()
+        return window
+    }
+
+    private func noteID(of notification: Notification) -> UUID? {
+        guard let window = notification.object as? NSWindow else { return nil }
+        return windows.first(where: { $0.value === window })?.key
     }
 
     /// Save on every move, not at quit, so a crash or `kill` keeps the
     /// last position too.
     func windowDidMove(_ notification: Notification) {
-        guard let window = notification.object as? NSWindow,
-              let id = panels.first(where: { $0.value === window })?.key else { return }
+        guard let id = noteID(of: notification), let window = windows[id] else { return }
         store.setOrigin(NSStringFromPoint(window.frame.origin), for: id)
     }
 
-    /// Opens a new, empty note 24 points to the left of and below the
-    /// source panel, clamped fully inside that panel's screen, and gives
-    /// it keyboard focus without activating the app.
+    /// Saves origin and size together: a resize from the left or bottom
+    /// edge moves the origin without always posting `windowDidMove`.
+    func windowDidResize(_ notification: Notification) {
+        guard let id = noteID(of: notification), let window = windows[id] else { return }
+        store.setFrame(origin: NSStringFromPoint(window.frame.origin),
+                       size: NSStringFromSize(window.frame.size),
+                       for: id)
+    }
+
+    /// A note window never grows larger than its screen's visible area.
+    func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
+        guard let screen = sender.screen?.visibleFrame else { return frameSize }
+        return NSSize(width: min(frameSize.width, screen.width),
+                      height: min(frameSize.height, screen.height))
+    }
+
+    /// Opens a new, empty note at the source window's size, 24 points to
+    /// the left of and below it, clamped fully inside that window's
+    /// screen, and gives it keyboard focus.
     private func addNote(after id: UUID) {
-        guard let sourcePanel = panels[id] else { return }
-        let size = Self.panelSize
-        let screen = sourcePanel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
-        let proposedOrigin = NSPoint(x: sourcePanel.frame.origin.x - 24,
-                                     y: sourcePanel.frame.origin.y - 24)
+        guard let sourceWindow = windows[id] else { return }
+        let size = sourceWindow.frame.size
+        let screen = sourceWindow.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
+        let proposedOrigin = NSPoint(x: sourceWindow.frame.origin.x - 24,
+                                     y: sourceWindow.frame.origin.y - 24)
         let origin = clamp(NSRect(origin: proposedOrigin, size: size), into: screen)
 
-        let note = store.add(origin: NSStringFromPoint(origin))
-        let panel = openPanel(for: note)
+        let note = store.add(origin: NSStringFromPoint(origin), size: NSStringFromSize(size))
+        let window = openWindow(for: note)
 
-        panel.makeKey()
+        window.makeKeyAndOrderFront(nil)
         // The text view exists only after SwiftUI builds the hosting
         // view's hierarchy, which happens on the next run loop turn.
         DispatchQueue.main.async {
-            if let textView = panel.contentView?.firstTextView {
-                panel.makeFirstResponder(textView)
+            if let textView = window.contentView?.firstTextView {
+                window.makeFirstResponder(textView)
             }
         }
     }
 
-    /// Removes a note and its panel at once. Removing the last note
+    /// Removes a note and its window at once. Removing the last note
     /// quits the app, so the next launch starts from one empty note.
     private func removeNote(_ id: UUID) {
-        guard let panel = panels[id] else { return }
-        // Closing the panel would otherwise report a move to the origin
+        guard let window = windows[id] else { return }
+        // Closing the window would otherwise report a move to the origin
         // it closes at; drop the delegate first so nothing is saved for
         // a note that no longer exists.
-        panel.delegate = nil
+        window.delegate = nil
         store.remove(id)
-        panels.removeValue(forKey: id)
-        panel.close()
-        if panels.isEmpty {
+        windows.removeValue(forKey: id)
+        window.close()
+        if windows.isEmpty {
             NSApp.terminate(nil)
         }
     }
 }
 
 let app = NSApplication.shared
-app.setActivationPolicy(.accessory)   // no Dock icon
+app.setActivationPolicy(.regular)   // Dock icon and visible app menus
 let delegate = AppDelegate()
 app.delegate = delegate
 app.run()

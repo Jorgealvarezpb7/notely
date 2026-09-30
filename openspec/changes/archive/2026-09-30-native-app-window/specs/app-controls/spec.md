@@ -1,28 +1,6 @@
-# app-controls Specification
+# Spec Delta
 
-## Purpose
-
-Gives the note app a Dock icon, an app icon, and standard ways to quit: the app menu, the Dock icon's menu, and Cmd+Q.
-
-## Requirements
-
-### Requirement: Quit from keyboard
-While any note panel has keyboard focus, Cmd+Q SHALL quit the app. When a window of another application has keyboard focus, Cmd+Q MUST NOT quit the app.
-
-#### Scenario: Cmd+Q while editing
-- **WHEN** a note area has keyboard focus and the user presses Cmd+Q
-- **THEN** the app quits
-
-#### Scenario: Cmd+Q in another app
-- **WHEN** the user clicks a window of another application and then presses Cmd+Q
-- **THEN** the note app keeps running
-
-### Requirement: Quitting keeps note text
-Every quit path in this capability SHALL keep the full text of every open note, including the last keystroke.
-
-#### Scenario: Quit soon after typing
-- **WHEN** the user types text in a note and, within one second of the last keystroke, quits through the app menu, the Dock icon's menu, or Cmd+Q
-- **THEN** the next launch shows the full text of every note, including the last keystroke
+## ADDED Requirements
 
 ### Requirement: Dock icon
 While the app runs, the Dock SHALL show the app's icon. While the app is active, the menu bar MUST show the app's menus, and the app menu MUST contain a Quit item that quits the app. The Dock icon's menu MUST contain a Quit item that quits the app. Clicking the Dock icon MUST bring every note window to the front.
@@ -54,3 +32,18 @@ The app SHALL use the supplied Notely artwork (a pink rounded square with a blac
 #### Scenario: Icon in application switcher
 - **WHEN** the app runs and the user presses Cmd+Tab
 - **THEN** the application switcher shows the Notely icon
+
+## MODIFIED Requirements
+
+### Requirement: Quitting keeps note text
+Every quit path in this capability SHALL keep the full text of every open note, including the last keystroke.
+
+#### Scenario: Quit soon after typing
+- **WHEN** the user types text in a note and, within one second of the last keystroke, quits through the app menu, the Dock icon's menu, or Cmd+Q
+- **THEN** the next launch shows the full text of every note, including the last keystroke
+
+## REMOVED Requirements
+
+### Requirement: Menu bar item
+**Reason**: The app now has a Dock icon and visible app menus, so the separate menu bar item is redundant.
+**Migration**: Quit from the app menu, the Dock icon's menu, or Cmd+Q.

@@ -19,7 +19,7 @@ Each note SHALL have its own panel, its own text, and its own position. Typing i
 - **THEN** only the first panel moves
 
 ### Requirement: Create a note from a panel
-Every panel's drag area SHALL show a "+" button. Clicking "+" MUST open one new, empty note panel that shows the placeholder text. The new panel MUST open 24 points to the left of and 24 points below the panel whose "+" was clicked. When that position is not fully inside the visible area of the clicked panel's screen, the new panel MUST move the shortest distance to be fully inside it. The new note's text area MUST receive keyboard focus, and the previously frontmost application MUST stay the active application.
+Every panel's drag area SHALL show a "+" button. Clicking "+" MUST open one new, empty note panel that shows the placeholder text. The new panel MUST open 24 points to the left of and 24 points below the panel whose "+" was clicked. When that position is not fully inside the visible area of the clicked panel's screen, the new panel MUST move the shortest distance to be fully inside it. The new note's text area MUST receive keyboard focus.
 
 #### Scenario: Click "+"
 - **WHEN** the user clicks "+" on a panel
@@ -33,7 +33,7 @@ Every panel's drag area SHALL show a "+" button. Clicking "+" MUST open one new,
 #### Scenario: Click "+" while another app is frontmost
 - **WHEN** another application is frontmost and the user clicks "+" once
 - **THEN** a new panel opens on that click
-- **AND** the other application stays the active application in the menu bar
+- **AND** the new panel's note area receives keystrokes
 
 ### Requirement: Remove a note from its panel
 Every panel's drag area SHALL show a "−" button. Clicking "−" MUST close that panel and delete that note's text at once, with no confirmation. Other notes MUST stay open and unchanged. A removed note MUST NOT return on the next launch.
@@ -57,7 +57,7 @@ When the user removes the only open note, the app SHALL quit. The next launch MU
 #### Scenario: Click "−" on the only note
 - **WHEN** one note is open and the user clicks "−" on it
 - **THEN** the app quits
-- **AND** the panel and the menu bar item disappear
+- **AND** the note window and the Dock icon disappear
 
 #### Scenario: Launch after removing the last note
 - **WHEN** the app quit because the user removed the last note, and the user launches it again

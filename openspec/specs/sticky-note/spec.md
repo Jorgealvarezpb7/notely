@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Provides always-on-top floating notes that the user can type into, and that keep their text and position between app launches.
+Provides note windows that the user can type into, and that keep their text and position between app launches.
 
 ## Requirements
 
@@ -19,19 +19,11 @@ Every note panel SHALL show one plain-text note area in place of the previous gr
 
 #### Scenario: Long text
 - **WHEN** a note's text is longer than the visible note area
-- **THEN** the note area scrolls vertically and the panel size does not change
+- **THEN** the note area scrolls vertically and the note window keeps its current size
 
 #### Scenario: Greeting and clock removed
 - **WHEN** the app launches
 - **THEN** no panel shows greeting text or a clock
-
-### Requirement: Editing does not steal app focus
-Clicking the note area SHALL give it keyboard focus without making the app the active application. The previously frontmost application MUST stay frontmost.
-
-#### Scenario: Click note while another app is frontmost
-- **WHEN** another application is frontmost and the user clicks inside the note area
-- **THEN** the note area receives keystrokes
-- **AND** the other application stays the active application in the menu bar
 
 ### Requirement: End editing
 The user SHALL be able to end editing from the keyboard. Ending editing MUST remove keyboard focus from the note area and MUST keep the note text.
@@ -67,13 +59,6 @@ The user SHALL be able to move the panel by dragging a visible drag area that is
 - **WHEN** the user drags across text in the note area
 - **THEN** the text is selected and the panel does not move
 
-### Requirement: Floating panel behavior preserved
-Every note panel SHALL keep the existing floating behavior: it stays above normal windows, shows on all Spaces, and the app shows no Dock icon.
-
-#### Scenario: Switch Space
-- **WHEN** the user switches to another Space
-- **THEN** every note panel is visible on that Space with the same text
-
 ### Requirement: Panel position persists
 Every panel SHALL open at the position where the user last left it. When a note has no saved position, or its saved position is not on any connected screen, its panel MUST open 20 points from the top and right edges of the main screen's visible area. Every panel MUST always open fully inside one screen's visible area.
 
@@ -92,3 +77,19 @@ Every panel SHALL open at the position where the user last left it. When a note 
 #### Scenario: Saved position partly off-screen
 - **WHEN** a note's saved position puts part of its panel outside the visible area of the screen it overlaps, and the app launches
 - **THEN** that panel opens fully inside that screen's visible area, moved the shortest distance from the saved position
+
+### Requirement: Normal window layering
+Every note window SHALL stack with other applications' windows as a normal window: it MUST NOT stay above other applications' windows. A note window MUST show only on the Space where it is open. Clicking a note window MUST bring it to the front and make the app the active application.
+
+#### Scenario: Click another app's window
+- **WHEN** a note window overlaps a window of another application and the user clicks that other window
+- **THEN** the other window comes in front of the note window
+
+#### Scenario: Click a note window behind another app
+- **WHEN** a note window is partly behind a window of another application and the user clicks the visible part of the note window
+- **THEN** the note window comes to the front
+- **AND** the menu bar shows the app's menus
+
+#### Scenario: Switch Space
+- **WHEN** a note window is open on one Space and the user switches to another Space
+- **THEN** that note window is not visible on the other Space
