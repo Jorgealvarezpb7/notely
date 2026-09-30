@@ -1,10 +1,6 @@
-# sticky-note Specification
+# Spec Delta
 
-## Purpose
-
-Provides always-on-top floating notes that the user can type into, and that keep their text and position between app launches.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Editable note text
 Every note panel SHALL show one plain-text note area in place of the previous greeting and clock. The user MUST be able to type, delete, select, copy, and paste text in each note area.
@@ -25,22 +21,6 @@ Every note panel SHALL show one plain-text note area in place of the previous gr
 - **WHEN** the app launches
 - **THEN** no panel shows greeting text or a clock
 
-### Requirement: Editing does not steal app focus
-Clicking the note area SHALL give it keyboard focus without making the app the active application. The previously frontmost application MUST stay frontmost.
-
-#### Scenario: Click note while another app is frontmost
-- **WHEN** another application is frontmost and the user clicks inside the note area
-- **THEN** the note area receives keystrokes
-- **AND** the other application stays the active application in the menu bar
-
-### Requirement: End editing
-The user SHALL be able to end editing from the keyboard. Ending editing MUST remove keyboard focus from the note area and MUST keep the note text.
-
-#### Scenario: Press Esc while editing
-- **WHEN** the note area has keyboard focus and the user presses Esc
-- **THEN** the note area loses keyboard focus and shows no caret
-- **AND** the note text is unchanged
-
 ### Requirement: Note persistence
 The text of every note SHALL persist across app quit and relaunch. Changes MUST be saved without an explicit save action.
 
@@ -55,17 +35,6 @@ The text of every note SHALL persist across app quit and relaunch. Changes MUST 
 #### Scenario: Save without explicit action
 - **WHEN** the user types text in any note and the app is quit normally within one second of the last keystroke
 - **THEN** the next launch shows that note's full text including the last keystroke
-
-### Requirement: Panel stays movable
-The user SHALL be able to move the panel by dragging a visible drag area that is not the text. Dragging inside the text MUST select text and MUST NOT move the panel.
-
-#### Scenario: Drag the drag area
-- **WHEN** the user drags the panel's drag area
-- **THEN** the panel moves with the pointer
-
-#### Scenario: Drag inside text
-- **WHEN** the user drags across text in the note area
-- **THEN** the text is selected and the panel does not move
 
 ### Requirement: Floating panel behavior preserved
 Every note panel SHALL keep the existing floating behavior: it stays above normal windows, shows on all Spaces, and the app shows no Dock icon.

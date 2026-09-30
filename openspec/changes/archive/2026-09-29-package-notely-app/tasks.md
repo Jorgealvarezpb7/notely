@@ -28,4 +28,4 @@ resize
 menu
 support for multiple notes
 APP ON DOCK
-other buttons
+other button
