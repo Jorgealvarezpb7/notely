@@ -31,7 +31,7 @@ A note window MUST NOT become smaller than 160 points wide or 100 points high. A
 
 #### Scenario: Controls stay visible at minimum size
 - **WHEN** a note window is at its minimum size
-- **THEN** its drag area shows the "+" and "−" buttons
+- **THEN** its drag area shows the "−" and trash buttons
 - **AND** its note area shows at least one line of text
 
 ### Requirement: Note size persists
@@ -49,9 +49,9 @@ Every note window SHALL open at the size it had when the app last quit. A note w
 - **WHEN** a note's saved size is larger than the visible area of the screen where its window opens
 - **THEN** the window opens fully inside that visible area, no larger than it
 
-### Requirement: New note size
-A note created with "+" SHALL open at the same size as the note window whose "+" was clicked. A note created at first launch, or after the last note was removed, MUST open at 220 by 150 points.
+### Requirement: Default size for new notes
+A note created from the menu or at first launch SHALL open at 220 by 150 points. When 220 by 150 points does not fit inside the visible area of the screen where the window opens, the window MUST shrink to fit that visible area.
 
-#### Scenario: Click "+" on a resized note
-- **WHEN** a note window is 300 by 200 points and the user clicks its "+"
-- **THEN** the new note window opens at 300 by 200 points
+#### Scenario: Create a note from the menu
+- **WHEN** a note window is 300 by 200 points and the user clicks "+ New Note" in the menu
+- **THEN** the new note window opens at 220 by 150 points
