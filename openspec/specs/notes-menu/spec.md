@@ -55,7 +55,7 @@ The menu window SHALL show the standard red, yellow, and green window buttons at
 - **THEN** it shows no red, yellow, or green button
 
 ### Requirement: Note list
-The menu window SHALL show a "+ New" row first, followed by one row for every saved note, whether its window is open or closed. Rows MUST be ordered newest note first. A row's title MUST be the first line of the note's text that is not empty after trimming spaces, or "Untitled note" when the note has no such line. A row's title MUST update while the user types in that note. When the list is longer than the menu window, the menu MUST scroll vertically. While the pointer is over an enabled row or the chooser's "<--" control, that control MUST show a lighter background; disabled rows MUST NOT change.
+The menu window SHALL show a "+ New" row first, followed by one row for every saved note and list, whether its window is open or closed. Rows MUST be ordered newest first, with notes and lists mixed. A note row's title MUST be the first line of the note's text that is not empty after trimming spaces, or "Untitled note" when the note has no such line. A list row's title MUST be the list's title after trimming spaces, or "Untitled list" when that is empty, and a list row MUST show a checklist icon at its trailing edge. A row's title MUST update while the user types in that note or list title. When the list is longer than the menu window, the menu MUST scroll vertically. While the pointer is over an enabled row or the chooser's "<--" control, that control MUST show a lighter background; disabled rows MUST NOT change.
 
 #### Scenario: Rows for open and closed notes
 - **WHEN** one note window is open and one note is closed
@@ -82,6 +82,15 @@ The menu window SHALL show a "+ New" row first, followed by one row for every sa
 - **WHEN** the user changes the first line of an open note
 - **THEN** that note's row shows the new first line without the user doing anything else
 
+#### Scenario: List row
+- **WHEN** a list's title is "Groceries"
+- **THEN** its row shows "Groceries" and a checklist icon at the trailing edge
+- **AND** when the title is empty, the row shows "Untitled list"
+
+#### Scenario: Notes and lists mixed
+- **WHEN** the user creates note A, then list B, then note C
+- **THEN** the rows show C, B, and A, in that order
+
 ### Requirement: Open a note from the menu
 Clicking a note's row SHALL show that note's window in front of other windows and make it the key window. When the note window is closed, it MUST open with the note's saved text, position, and size. When the note window is already open, it MUST NOT move or change size, and no second window MUST open for that note.
 
@@ -93,23 +102,6 @@ Clicking a note's row SHALL show that note's window in front of other windows an
 - **WHEN** a note window is open behind other windows and the user clicks its row
 - **THEN** that note window comes to the front at the same position and size
 - **AND** no other window opens for that note
-
-### Requirement: New chooser
-Clicking "+ New" SHALL replace the note list in the menu window with a chooser. The chooser MUST show a "<--" back control at its top-right, a "+ New Note" row, and a "+ New List" row. Clicking "<--" MUST show the note list again without creating anything. "+ New List" MUST show as disabled, and clicking it MUST do nothing.
-
-#### Scenario: Open the chooser
-- **WHEN** the user clicks "+ New" in the menu
-- **THEN** the menu window shows "<--", "+ New Note", and "+ New List"
-
-#### Scenario: Back from the chooser
-- **WHEN** the chooser shows and the user clicks "<--"
-- **THEN** the menu window shows the note list
-- **AND** no note is created
-
-#### Scenario: New List is a placeholder
-- **WHEN** the chooser shows and the user clicks "+ New List"
-- **THEN** nothing is created and the chooser stays visible
-- **AND** "+ New List" looks disabled
 
 ### Requirement: Create a note from the menu
 Clicking "+ New Note" SHALL create one new, empty note and open its window with placeholder text, at 220 by 150 points. The new window's top edge MUST line up with the menu window's top edge, 12 points to the right of the menu window. When that frame is not fully inside the visible area of the menu window's screen, the window MUST open 12 points to the left of the menu window instead. When neither frame is fully inside that visible area, the window MUST move the shortest distance from the right-hand frame to be fully inside it. The new note's text area MUST receive keyboard focus. The menu window MUST then show the note list with the new note's row first.
@@ -147,7 +139,7 @@ The menu window SHALL open at the position and size it had when the app last qui
 Deleting the last note SHALL NOT quit the app. The menu window MUST stay open and show only "+ New". The next launch MUST open the menu window with no note windows and no note rows.
 
 #### Scenario: Delete the last note
-- **WHEN** one note exists and the user clicks its trash button
+- **WHEN** one note exists and the user clicks its trash button and then "Delete"
 - **THEN** the note window closes and the app keeps running
 - **AND** the menu shows only "+ New"
 
@@ -155,3 +147,25 @@ Deleting the last note SHALL NOT quit the app. The menu window MUST stay open an
 - **WHEN** the user deleted every note, quits the app, and launches it again
 - **THEN** the menu window opens and shows only "+ New"
 - **AND** no note window opens
+
+### Requirement: New chooser with lists
+Clicking "+ New" SHALL replace the note list in the menu window with a chooser. The chooser MUST show a "<--" back control at its top-right, a "+ New Note" row, and a "+ New List" row, both enabled. Clicking "<--" MUST show the note list again without creating anything.
+
+#### Scenario: Open the chooser
+- **WHEN** the user clicks "+ New" in the menu
+- **THEN** the menu window shows "<--", "+ New Note", and "+ New List"
+- **AND** "+ New List" looks enabled and reacts to hover
+
+#### Scenario: Back from the chooser
+- **WHEN** the chooser shows and the user clicks "<--"
+- **THEN** the menu window shows the note list
+- **AND** nothing is created
+
+### Requirement: Create a list from the menu
+Clicking "+ New List" SHALL create one new list with an empty title and no items, and open its window at the same frame a new note would get: 220 by 150 points, placed next to the menu window by the rules of "Create a note from the menu". The new list's title MUST receive keyboard focus. The menu window MUST then show the note list with the new list's row first.
+
+#### Scenario: Click "+ New List"
+- **WHEN** the menu has room on its right and the user clicks "+ New List"
+- **THEN** a new 220 by 150 point list window opens 12 points to the right of the menu, top edges aligned
+- **AND** its title row shows "Untitled list" and receives keystrokes
+- **AND** the menu shows the note list with "Untitled list" as the first row
