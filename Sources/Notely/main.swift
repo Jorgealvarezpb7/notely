@@ -163,6 +163,10 @@ struct StripButton: NSViewRepresentable {
     }
 }
 
+/// Typeface for note text and its placeholder, at the macOS body text
+/// size. One value for both keeps the placeholder in step with the text.
+let noteFont = Font.custom("American Typewriter", size: 15, relativeTo: .body)
+
 struct NoteView: View {
     @ObservedObject var store: NoteStore
     let id: UUID
@@ -202,10 +206,11 @@ struct NoteView: View {
             ZStack(alignment: .topLeading) {
                 TextEditor(text: text)
                     .scrollContentBackground(.hidden)
-                    .font(.body)
+                    .font(noteFont)
 
                 if text.wrappedValue.isEmpty {
                     Text("Type a note…")
+                        .font(noteFont)
                         .foregroundStyle(.secondary)
                         .padding(.top, 8)
                         .padding(.leading, 5)
@@ -330,12 +335,59 @@ private extension NSView {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let store = NoteStore()
     var windows: [UUID: NoteWindow] = [:]
+    /// One scroller-style observation per note window, keyed by window.
+    var scrollerObservations: [ObjectIdentifier: NSKeyValueObservation] = [:]
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = makeMainMenu()
 
         for note in store.notes {
             openWindow(for: note)
+        }
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(preferredScrollerStyleDidChange(_:)),
+            name: NSScroller.preferredScrollerStyleDidChangeNotification,
+            object: nil
+        )
+    }
+
+    /// Every scroll view resets itself to the system scroller style when
+    /// the "Show scroll bars" setting or the pointing device changes.
+    /// Observers run in no fixed order, so apply overlay again on the next
+    /// run loop turn, after that reset.
+    @objc private func preferredScrollerStyleDidChange(_ notification: Notification) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            for window in self.windows.values {
+                self.applyOverlayScroller(to: window)
+            }
+        }
+    }
+
+    /// Gives the note's scroll view overlay scrollers, which show only
+    /// while the user scrolls, whatever the system scroll bar setting.
+    /// SwiftUI builds the text view on a later run loop turn; when it is
+    /// not there yet, try once more on the next turn.
+    private func applyOverlayScroller(to window: NSWindow, retry: Bool = true) {
+        guard let scrollView = window.contentView?.firstTextView?.enclosingScrollView else {
+            if retry {
+                DispatchQueue.main.async { [weak self, weak window] in
+                    guard let window else { return }
+                    self?.applyOverlayScroller(to: window, retry: false)
+                }
+            }
+            return
+        }
+        scrollView.scrollerStyle = .overlay
+        scrollView.autohidesScrollers = true
+
+        // SwiftUI and AppKit set the style back to the system preference
+        // after this; set overlay again whenever it changes.
+        scrollerObservations[ObjectIdentifier(window)] = scrollView.observe(\.scrollerStyle) { scrollView, _ in
+            guard scrollView.scrollerStyle != .overlay else { return }
+            scrollView.scrollerStyle = .overlay
         }
     }
 
@@ -406,6 +458,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.delegate = self
         windows[note.id] = window
         window.orderFrontRegardless()
+        // The text view exists only after SwiftUI builds the hosting
+        // view's hierarchy, on the next run loop turn.
+        DispatchQueue.main.async { [weak self, weak window] in
+            guard let window else { return }
+            self?.applyOverlayScroller(to: window)
+        }
         return window
     }
 
@@ -471,6 +529,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.delegate = nil
         store.remove(id)
         windows.removeValue(forKey: id)
+        scrollerObservations.removeValue(forKey: ObjectIdentifier(window))
         window.close()
         if windows.isEmpty {
             NSApp.terminate(nil)
