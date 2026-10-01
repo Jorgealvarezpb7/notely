@@ -216,22 +216,32 @@ final class NoteWindow: NSWindow {
     }
 }
 
-/// Thin header strip that drags the window on mouseDown. TextEditor
-/// consumes mouseDown itself (for text selection), so dragging by the
-/// window background alone cannot work once the note fills the window;
-/// this strip gives an explicit, visible drag target instead.
-struct DragHandle: NSViewRepresentable {
-    final class DragView: NSView {
+/// A click target that ends editing, as Esc does, and with `drags` then
+/// drags the window. TextEditor consumes mouseDown itself (for text
+/// selection), so dragging by the window background alone cannot work
+/// once the note fills the window; the bars give an explicit, visible
+/// drag target instead.
+struct EndEditingView: NSViewRepresentable {
+    let drags: Bool
+
+    final class ClickView: NSView {
+        var drags = true
+
         override func mouseDown(with event: NSEvent) {
-            window?.performDrag(with: event)
+            window?.makeFirstResponder(nil)
+            if drags {
+                window?.performDrag(with: event)
+            }
         }
     }
 
-    func makeNSView(context: Context) -> NSView {
-        DragView()
+    func makeNSView(context: Context) -> ClickView {
+        ClickView()
     }
 
-    func updateNSView(_ nsView: NSView, context: Context) {}
+    func updateNSView(_ nsView: ClickView, context: Context) {
+        nsView.drags = drags
+    }
 }
 
 /// A small borderless button for "−" and trash in the drag strip. It
@@ -282,26 +292,32 @@ struct StripButton: NSViewRepresentable {
 /// size. One value for both keeps the placeholder in step with the text.
 let noteFont = Font.custom("American Typewriter", size: 15, relativeTo: .body)
 
-/// The drag strip shared by note and list windows: a grip to drag the
-/// window, then "−" (close) and trash (delete) at the trailing edge.
+/// Height of the top and bottom bars: the buttons plus a margin around
+/// them.
+let barHeight = max(16, StripButton.referenceSize.height) + 12
+
+/// Gap between a bar and the note or list content.
+let barGap: CGFloat = 4
+
+/// Shade of both bars: `primary` is black in light appearance and white
+/// in dark appearance, so the bars show darker or lighter than the note.
+let barFill = Color.primary.opacity(0.08)
+
+/// The top bar shared by note and list windows: drags the window and
+/// ends editing, with "−" (close) and trash (delete) at the trailing edge.
 struct NoteStrip: View {
     var onClose: () -> Void
     var onDelete: () -> Void
 
     var body: some View {
-        // The buttons sit on top of the drag handle, so clicks on them
+        // The buttons sit on top of the click target, so clicks on them
         // never start a window drag.
         ZStack {
-            DragHandle()
-                .overlay(
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(Color.secondary.opacity(0.4))
-                        .frame(width: 32, height: 4)
-                )
+            EndEditingView(drags: true)
             // The wide gap keeps trash away from "−", so a close is not
             // mistaken for a delete.
             HStack(spacing: 16) {
-                Spacer()
+                Spacer(minLength: 0)
                 StripButton(symbolName: "minus", accessibilityLabel: "Close Note", action: onClose)
                     .frame(width: StripButton.referenceSize.width,
                            height: StripButton.referenceSize.height)
@@ -309,8 +325,26 @@ struct NoteStrip: View {
                     .frame(width: StripButton.referenceSize.width,
                            height: StripButton.referenceSize.height)
             }
+            .padding(.trailing, 12)
         }
-        .frame(height: max(16, StripButton.referenceSize.height))
+        .frame(minWidth: 0, maxWidth: .infinity)
+        .frame(height: barHeight)
+        .background(barFill)
+    }
+}
+
+/// Height of the bottom bar: 20% lower than the top bar, which needs
+/// room for the buttons.
+let bottomBarHeight = (barHeight * 0.8).rounded()
+
+/// The bottom bar of note and list windows: drags the window and ends
+/// editing. Empty for now; later controls go here.
+struct BottomBar: View {
+    var body: some View {
+        EndEditingView(drags: true)
+            .frame(minWidth: 0, maxWidth: .infinity)
+            .frame(height: bottomBarHeight)
+            .background(barFill)
     }
 }
 
@@ -345,29 +379,36 @@ struct NoteView: View {
     }
 
     var body: some View {
-        VStack(spacing: 4) {
-            NoteStrip(onClose: onClose, onDelete: onDelete)
+        ZStack(alignment: .topLeading) {
+            TextEditor(text: text)
+                .scrollContentBackground(.hidden)
+                .font(noteFont)
 
-            ZStack(alignment: .topLeading) {
-                TextEditor(text: text)
-                    .scrollContentBackground(.hidden)
+            if text.wrappedValue.isEmpty {
+                Text("Type a note…")
                     .font(noteFont)
-
-                if text.wrappedValue.isEmpty {
-                    Text("Type a note…")
-                        .font(noteFont)
-                        .foregroundStyle(Color(nsColor: .textColor))
-                        .padding(.top, 8)
-                        .padding(.leading, 5)
-                        .allowsHitTesting(false)
-                }
+                    .foregroundStyle(Color(nsColor: .textColor))
+                    .padding(.top, 8)
+                    .padding(.leading, 5)
+                    .allowsHitTesting(false)
             }
         }
-        .padding(12)
+        .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, 12)
+        .padding(.top, barHeight + barGap)
+        .padding(.bottom, bottomBarHeight + barGap)
+        // The bars are overlays outside the padding, so their fill runs
+        // from edge to edge, as in list windows.
+        .overlay(alignment: .top) {
+            NoteStrip(onClose: onClose, onDelete: onDelete)
+        }
+        .overlay(alignment: .bottom) {
+            BottomBar()
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.ultraThinMaterial)
-        // Fill the transparent title bar too, so the drag strip sits at
-        // the top edge of the window as before.
+        // Fill the transparent title bar too, so the top bar sits at the
+        // top edge of the window.
         .ignoresSafeArea()
     }
 }
@@ -506,6 +547,9 @@ struct ListField: NSViewRepresentable {
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: ListTextField, context: Context) -> CGSize? {
         guard let width = proposal.width, width.isFinite, width > 0,
               let cell = nsView.cell?.copy() as? NSCell else { return nil }
+        // Without this the field's intrinsic width is its text on one
+        // line, which can push the window's content wider than the window.
+        nsView.preferredMaxLayoutWidth = width
         cell.attributedStringValue = Self.styled(text.isEmpty ? " " : text, bold: bold, done: done)
         let size = cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: width,
                                                    height: .greatestFiniteMagnitude))
@@ -656,34 +700,43 @@ struct ListView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 6) {
-                ListField(text: store.note(id)?.title ?? "",
-                          placeholder: "Untitled list",
-                          bold: true,
-                          isTitle: true,
-                          target: .title,
-                          focus: focus,
-                          onChange: { store.setTitle($0, for: id) },
-                          onCommand: { handle($0, at: .title) })
-                    .padding(.bottom, 2)
+        GeometryReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 6) {
+                    ListField(text: store.note(id)?.title ?? "",
+                              placeholder: "Untitled list",
+                              isTitle: true,
+                              target: .title,
+                              focus: focus,
+                              onChange: { store.setTitle($0, for: id) },
+                              onCommand: { handle($0, at: .title) })
+                        .padding(.bottom, 2)
 
-                ForEach(rows) { row in
-                    rowView(row)
+                    ForEach(rows) { row in
+                        rowView(row)
+                    }
                 }
+                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 4)
+                // Reaches down to the bottom of the visible area, so a
+                // click on the empty space below the rows ends editing.
+                .frame(minHeight: proxy.size.height, alignment: .top)
+                .background(EndEditingView(drags: false))
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 4)
         }
-        .padding(.top, max(16, StripButton.referenceSize.height) + 4)
-        // The strip is an overlay, not the first row of a stack: AppKit
-        // orders the scroll view's NSScrollView above views declared
-        // before it, and it reaches up under the transparent title bar,
-        // where it took the clicks meant for "−" and trash.
+        .padding(.horizontal, 12)
+        .padding(.top, barHeight + barGap)
+        .padding(.bottom, bottomBarHeight + barGap)
+        // The bars are overlays, not rows of a stack: AppKit orders the
+        // scroll view's NSScrollView above views declared before it, and
+        // it reaches up under the transparent title bar, where it took
+        // the clicks meant for "−" and trash.
         .overlay(alignment: .top) {
             NoteStrip(onClose: onClose, onDelete: onDelete)
         }
-        .padding(12)
+        .overlay(alignment: .bottom) {
+            BottomBar()
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.ultraThinMaterial)
         // Fill the transparent title bar too, as in note windows.
@@ -935,9 +988,10 @@ func clamp(_ frame: NSRect, into screen: NSRect) -> NSPoint {
            y: min(max(frame.minY, screen.minY), screen.maxY - frame.height))
 }
 
-/// Smallest size a note window can have: room for the drag strip and one
-/// line of text.
-let minimumNoteSize = NSSize(width: 160, height: 100)
+/// Smallest size a note window can have: half the width of a new note,
+/// which still fits the top bar's buttons, and room for the bottom bar
+/// and one line of text.
+let minimumNoteSize = NSSize(width: 110, height: 120)
 
 /// Size of a note with no saved size.
 let defaultNoteSize = NSSize(width: 220, height: 150)
@@ -1296,11 +1350,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                        for: id)
     }
 
-    /// A note window never grows larger than its screen's visible area.
+    /// A note window never grows larger than its screen's visible area,
+    /// nor shrinks below `minimumNoteSize`. Not `sender.minSize`: AppKit
+    /// ties it to `contentMinSize`, which the SwiftUI hosting view can
+    /// lower to its own fitting size, so it does not hold on its own.
     func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
-        guard let screen = sender.screen?.visibleFrame else { return frameSize }
-        return NSSize(width: min(frameSize.width, screen.width),
-                      height: min(frameSize.height, screen.height))
+        let minimum = minimumNoteSize
+        guard let screen = sender.screen?.visibleFrame else {
+            return NSSize(width: max(frameSize.width, minimum.width),
+                          height: max(frameSize.height, minimum.height))
+        }
+        return NSSize(width: max(min(frameSize.width, screen.width), minimum.width),
+                      height: max(min(frameSize.height, screen.height), minimum.height))
     }
 
     /// Opens a new, empty note or list next to the menu window (see
