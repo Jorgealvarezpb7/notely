@@ -1,17 +1,43 @@
 import AppKit
 import SwiftUI
 
+/// One checklist item. A list's `items` are kept in display order: the
+/// unchecked items, then the checked items, most recently checked first.
+struct ListItem: Codable, Identifiable, Equatable {
+    let id: UUID
+    var text: String
+    var done: Bool
+}
+
 /// One note: its text and, once the window has been moved or resized,
 /// its saved window position in `NSStringFromPoint` form and its saved
 /// window size in `NSStringFromSize` form. `isOpen` is `false` once the
 /// user closes the note's window with "−"; `nil` means open. All three are
 /// optional, so notes saved by earlier versions still decode, and open.
+///
+/// A list is a note whose `kind` is "list", with a `title` and `items`.
+/// `kind` is a string, not an enum, so a kind added by a later version
+/// still decodes (as a note) instead of failing the whole saved list.
 struct Note: Codable, Identifiable {
     let id: UUID
     var text: String
     var origin: String?
     var size: String?
     var isOpen: Bool?
+    var kind: String?
+    var title: String?
+    var items: [ListItem]?
+
+    static let listKind = "list"
+
+    var isList: Bool { kind == Self.listKind }
+}
+
+/// A list as plain text, written into `text` so a build without lists
+/// shows the list's content as a readable note.
+func plainText(ofList note: Note) -> String {
+    ([note.title ?? ""] + (note.items ?? []).map { ($0.done ? "[x] " : "[ ] ") + $0.text })
+        .joined(separator: "\n")
 }
 
 /// Holds every note and keeps `UserDefaults` in sync on every change, the
@@ -47,6 +73,10 @@ final class NoteStore: ObservableObject {
             defaults.removeObject(forKey: Self.legacyOriginKey)
             save()
         }
+    }
+
+    func note(_ id: UUID) -> Note? {
+        notes.first(where: { $0.id == id })
     }
 
     func text(for id: UUID) -> String {
@@ -86,9 +116,86 @@ final class NoteStore: ObservableObject {
         return note
     }
 
+    @discardableResult
+    func addList(origin: String?, size: String?) -> Note {
+        var note = Note(id: UUID(), text: "", origin: origin, size: size)
+        note.kind = Note.listKind
+        note.title = ""
+        note.items = []
+        notes.append(note)
+        save()
+        return note
+    }
+
     func remove(_ id: UUID) {
         notes.removeAll { $0.id == id }
         save()
+    }
+
+    /// Applies one change to a list, refreshes its plain-text copy, and
+    /// saves.
+    private func updateList(_ id: UUID, _ change: (inout Note) -> Void) {
+        guard let index = notes.firstIndex(where: { $0.id == id }) else { return }
+        change(&notes[index])
+        notes[index].text = plainText(ofList: notes[index])
+        save()
+    }
+
+    func setTitle(_ title: String, for id: UUID) {
+        updateList(id) { $0.title = title }
+    }
+
+    /// Adds an unchecked item at the end of the unchecked items.
+    @discardableResult
+    func appendItem(_ text: String, for id: UUID) -> UUID {
+        let item = ListItem(id: UUID(), text: text, done: false)
+        updateList(id) { note in
+            var items = note.items ?? []
+            items.insert(item, at: items.firstIndex(where: \.done) ?? items.count)
+            note.items = items
+        }
+        return item.id
+    }
+
+    /// Adds an empty unchecked item directly after the unchecked item
+    /// `itemID`.
+    @discardableResult
+    func insertItem(after itemID: UUID, for id: UUID) -> UUID {
+        let item = ListItem(id: UUID(), text: "", done: false)
+        updateList(id) { note in
+            var items = note.items ?? []
+            let index = items.firstIndex(where: { $0.id == itemID }).map { $0 + 1 } ?? items.count
+            items.insert(item, at: index)
+            note.items = items
+        }
+        return item.id
+    }
+
+    func setItemText(_ text: String, item itemID: UUID, for id: UUID) {
+        updateList(id) { note in
+            guard let index = note.items?.firstIndex(where: { $0.id == itemID }) else { return }
+            note.items?[index].text = text
+        }
+    }
+
+    func removeItem(_ itemID: UUID, for id: UUID) {
+        guard note(id)?.items?.contains(where: { $0.id == itemID }) == true else { return }
+        updateList(id) { note in note.items?.removeAll { $0.id == itemID } }
+    }
+
+    /// Checks or unchecks an item and moves it to index "number of
+    /// unchecked items": for a newly checked item that is the top of the
+    /// checked items, for a newly unchecked one the end of the unchecked
+    /// items.
+    func toggleItem(_ itemID: UUID, for id: UUID) {
+        updateList(id) { note in
+            var items = note.items ?? []
+            guard let index = items.firstIndex(where: { $0.id == itemID }) else { return }
+            var item = items.remove(at: index)
+            item.done.toggle()
+            items.insert(item, at: items.filter { !$0.done }.count)
+            note.items = items
+        }
     }
 
     private func save() {
@@ -175,6 +282,55 @@ struct StripButton: NSViewRepresentable {
 /// size. One value for both keeps the placeholder in step with the text.
 let noteFont = Font.custom("American Typewriter", size: 15, relativeTo: .body)
 
+/// The drag strip shared by note and list windows: a grip to drag the
+/// window, then "−" (close) and trash (delete) at the trailing edge.
+struct NoteStrip: View {
+    var onClose: () -> Void
+    var onDelete: () -> Void
+
+    var body: some View {
+        // The buttons sit on top of the drag handle, so clicks on them
+        // never start a window drag.
+        ZStack {
+            DragHandle()
+                .overlay(
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color.secondary.opacity(0.4))
+                        .frame(width: 32, height: 4)
+                )
+            // The wide gap keeps trash away from "−", so a close is not
+            // mistaken for a delete.
+            HStack(spacing: 16) {
+                Spacer()
+                StripButton(symbolName: "minus", accessibilityLabel: "Close Note", action: onClose)
+                    .frame(width: StripButton.referenceSize.width,
+                           height: StripButton.referenceSize.height)
+                StripButton(symbolName: "trash", accessibilityLabel: "Delete Note", action: onDelete)
+                    .frame(width: StripButton.referenceSize.width,
+                           height: StripButton.referenceSize.height)
+            }
+        }
+        .frame(height: max(16, StripButton.referenceSize.height))
+    }
+}
+
+/// A note window's content: the list editor for lists, the text editor
+/// for everything else.
+struct WindowContent: View {
+    @ObservedObject var store: NoteStore
+    let id: UUID
+    var onClose: () -> Void
+    var onDelete: () -> Void
+
+    var body: some View {
+        if store.note(id)?.isList == true {
+            ListView(store: store, id: id, onClose: onClose, onDelete: onDelete)
+        } else {
+            NoteView(store: store, id: id, onClose: onClose, onDelete: onDelete)
+        }
+    }
+}
+
 struct NoteView: View {
     @ObservedObject var store: NoteStore
     let id: UUID
@@ -190,26 +346,7 @@ struct NoteView: View {
 
     var body: some View {
         VStack(spacing: 4) {
-            // The buttons sit on top of the drag handle, so clicks on
-            // them never start a window drag.
-            ZStack {
-                DragHandle()
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 2)
-                            .fill(Color.secondary.opacity(0.4))
-                            .frame(width: 32, height: 4)
-                    )
-                HStack(spacing: 4) {
-                    Spacer()
-                    StripButton(symbolName: "minus", accessibilityLabel: "Close Note", action: onClose)
-                        .frame(width: StripButton.referenceSize.width,
-                               height: StripButton.referenceSize.height)
-                    StripButton(symbolName: "trash", accessibilityLabel: "Delete Note", action: onDelete)
-                        .frame(width: StripButton.referenceSize.width,
-                               height: StripButton.referenceSize.height)
-                }
-            }
-            .frame(height: max(16, StripButton.referenceSize.height))
+            NoteStrip(onClose: onClose, onDelete: onDelete)
 
             ZStack(alignment: .topLeading) {
                 TextEditor(text: text)
@@ -219,7 +356,7 @@ struct NoteView: View {
                 if text.wrappedValue.isEmpty {
                     Text("Type a note…")
                         .font(noteFont)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color(nsColor: .textColor))
                         .padding(.top, 8)
                         .padding(.leading, 5)
                         .allowsHitTesting(false)
@@ -233,6 +370,418 @@ struct NoteView: View {
         // the top edge of the window as before.
         .ignoresSafeArea()
     }
+}
+
+/// Where keyboard focus can go in a list window, in display order: the
+/// title, the items, and the "New item" row between unchecked and checked
+/// items.
+enum FocusTarget: Equatable {
+    case title
+    case item(UUID)
+    case newItem
+}
+
+/// A list window's pending focus move. The `ListField` whose target
+/// matches takes keyboard focus on the next run loop turn, once SwiftUI
+/// has created its view, and clears the request.
+final class ListFocus: ObservableObject {
+    @Published var request: FocusTarget?
+}
+
+/// Keys a `ListField` hands to its list instead of editing its own text.
+enum ListCommand {
+    case returnKey, deleteEmpty, up, down, toggle
+}
+
+/// The `NSTextField` behind every editable list row. It answers "Check
+/// Item" (Cmd+Return) only while it is an item: AppKit enables a menu item
+/// only when some responder responds to its action.
+final class ListTextField: NSTextField {
+    var isTitle = false
+    var onToggle: (() -> Void)?
+
+    override func responds(to aSelector: Selector!) -> Bool {
+        if aSelector == #selector(toggleChecklistItem(_:)) { return onToggle != nil }
+        return super.responds(to: aSelector)
+    }
+
+    @objc func toggleChecklistItem(_ sender: Any?) {
+        onToggle?()
+    }
+}
+
+/// One editable, wrapping list row: the title, an item, or "New item".
+/// AppKit rather than a SwiftUI `TextField`, because Return, Backspace and
+/// the arrow keys must be intercepted, and `onKeyPress` needs macOS 14.
+struct ListField: NSViewRepresentable {
+    let text: String
+    let placeholder: String
+    var bold = false
+    var done = false
+    var isTitle = false
+    var canToggle = false
+    let target: FocusTarget
+    @ObservedObject var focus: ListFocus
+    var onChange: (String) -> Void
+    var onEndEditing: () -> Void = {}
+    var onCommand: (ListCommand) -> Bool = { _ in false }
+
+    static func font(bold: Bool) -> NSFont {
+        NSFont(name: bold ? "AmericanTypewriter-Bold" : "AmericanTypewriter", size: 15)
+            ?? .systemFont(ofSize: 15, weight: bold ? .bold : .regular)
+    }
+
+    /// All list text, placeholders included, is white in dark appearance
+    /// and black in light appearance; checked items are struck through.
+    static func styled(_ text: String, bold: Bool, done: Bool) -> NSAttributedString {
+        var attributes: [NSAttributedString.Key: Any] = [
+            .font: font(bold: bold),
+            .foregroundColor: NSColor.textColor,
+        ]
+        if done {
+            attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
+        }
+        return NSAttributedString(string: text, attributes: attributes)
+    }
+
+    func makeNSView(context: Context) -> ListTextField {
+        let field = ListTextField()
+        field.isBordered = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.isEditable = true
+        field.isSelectable = true
+        field.usesSingleLineMode = false
+        field.cell?.wraps = true
+        field.cell?.isScrollable = false
+        field.lineBreakMode = .byWordWrapping
+        field.maximumNumberOfLines = 0
+        field.font = Self.font(bold: bold)
+        field.textColor = .textColor
+        field.placeholderAttributedString = NSAttributedString(string: placeholder, attributes: [
+            .font: Self.font(bold: bold),
+            .foregroundColor: NSColor.textColor,
+        ])
+        field.delegate = context.coordinator
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return field
+    }
+
+    func updateNSView(_ field: ListTextField, context: Context) {
+        context.coordinator.parent = self
+        field.isTitle = isTitle
+        if canToggle {
+            let onCommand = self.onCommand
+            field.onToggle = { _ = onCommand(.toggle) }
+        } else {
+            field.onToggle = nil
+        }
+
+        if let editor = field.currentEditor() as? NSTextView {
+            // While editing, the store already holds the typed text; only
+            // an outside change (the "New item" row turning into an item)
+            // replaces it. Never touch text an input method is composing.
+            if !editor.hasMarkedText(), editor.string != text {
+                editor.string = text
+            }
+        } else {
+            field.attributedStringValue = Self.styled(text, bold: bold, done: done)
+        }
+
+        if focus.request == target {
+            let listFocus = self.focus
+            let wanted = self.target
+            DispatchQueue.main.async { [weak field] in
+                guard let field, let window = field.window, listFocus.request == wanted else { return }
+                listFocus.request = nil
+                window.makeFirstResponder(field)
+                let end = (field.stringValue as NSString).length
+                field.currentEditor()?.selectedRange = NSRange(location: end, length: 0)
+            }
+        }
+    }
+
+    /// Height of the wrapped text at the proposed width, so long items
+    /// grow downward instead of being cut off.
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: ListTextField, context: Context) -> CGSize? {
+        guard let width = proposal.width, width.isFinite, width > 0,
+              let cell = nsView.cell?.copy() as? NSCell else { return nil }
+        cell.attributedStringValue = Self.styled(text.isEmpty ? " " : text, bold: bold, done: done)
+        let size = cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: width,
+                                                   height: .greatestFiniteMagnitude))
+        return CGSize(width: width, height: ceil(size.height))
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: ListField
+
+        init(_ parent: ListField) { self.parent = parent }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField else { return }
+            // Wait for an input method to commit (Option-e, then e)
+            // before saving, so the "New item" row never turns into an
+            // item halfway through a composed character.
+            if let editor = notification.userInfo?["NSFieldEditor"] as? NSTextView,
+               editor.hasMarkedText() { return }
+            parent.onChange(field.stringValue)
+        }
+
+        /// Ending an edit puts the field editor's plain text back into
+        /// the field, dropping the checked style; restyle it at once.
+        func controlTextDidEndEditing(_ notification: Notification) {
+            if let field = notification.object as? NSTextField {
+                field.attributedStringValue = ListField.styled(field.stringValue, bold: parent.bold,
+                                                               done: parent.done)
+            }
+            parent.onEndEditing()
+        }
+
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+            switch selector {
+            case #selector(NSResponder.insertNewline(_:)):
+                // Cmd+Return normally arrives through the "Check Item"
+                // menu item; this covers it reaching the field editor.
+                if NSApp.currentEvent?.modifierFlags.contains(.command) == true {
+                    return parent.onCommand(.toggle)
+                }
+                return parent.onCommand(.returnKey)
+            case #selector(NSResponder.deleteBackward(_:)):
+                return textView.string.isEmpty && parent.onCommand(.deleteEmpty)
+            case #selector(NSResponder.moveUp(_:)):
+                return caretLine(in: textView).isFirst && parent.onCommand(.up)
+            case #selector(NSResponder.moveDown(_:)):
+                return caretLine(in: textView).isLast && parent.onCommand(.down)
+            case #selector(NSResponder.cancelOperation(_:)):
+                control.window?.makeFirstResponder(nil)
+                return true
+            default:
+                return false
+            }
+        }
+
+        /// Whether the caret is on the first and/or last wrapped line of
+        /// the field, so Up and Down move inside a long item before they
+        /// move to the next row.
+        private func caretLine(in textView: NSTextView) -> (isFirst: Bool, isLast: Bool) {
+            let length = (textView.string as NSString).length
+            guard length > 0, let layoutManager = textView.layoutManager else { return (true, true) }
+            func lineY(_ characterIndex: Int) -> CGFloat {
+                let glyph = layoutManager.glyphIndexForCharacter(at: characterIndex)
+                return layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil).minY
+            }
+            let caret = min(textView.selectedRange().location, length - 1)
+            let y = lineY(caret)
+            return (y <= lineY(0), y >= lineY(length - 1))
+        }
+    }
+}
+
+/// Fill of a checked item's circle: white in dark appearance, dark gray
+/// in light appearance, where white would not show.
+let checkFill = Color(nsColor: NSColor(name: nil) { appearance in
+    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .white : .darkGray
+})
+
+/// The circle at the start of an item: an outline when unchecked, filled
+/// when checked. A plain button never takes keyboard focus, so clicking
+/// it leaves the item being edited alone.
+struct CheckCircle: View {
+    let done: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                if done {
+                    Circle().fill(checkFill)
+                } else {
+                    Circle().strokeBorder(Color.secondary, lineWidth: 1.5)
+                }
+            }
+            .frame(width: 18, height: 18)
+            .frame(width: 24, height: 24)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(done ? "Uncheck Item" : "Check Item")
+    }
+}
+
+/// One row below a list's title, in display order.
+enum ListRow: Identifiable {
+    case item(ListItem)
+    case newItem
+
+    var id: String {
+        switch self {
+        case .item(let item): return item.id.uuidString
+        case .newItem: return "new-item"
+        }
+    }
+
+    var target: FocusTarget {
+        switch self {
+        case .item(let item): return .item(item.id)
+        case .newItem: return .newItem
+        }
+    }
+}
+
+/// A list window's content: the shared strip, the title, the items, and
+/// the "New item" row between unchecked and checked items.
+struct ListView: View {
+    @ObservedObject var store: NoteStore
+    let id: UUID
+    var onClose: () -> Void
+    var onDelete: () -> Void
+    @StateObject private var focus = ListFocus()
+
+    private var items: [ListItem] { store.note(id)?.items ?? [] }
+
+    /// One array for one `ForEach`, so an item keeps its identity when it
+    /// moves between the unchecked and checked groups and slides there.
+    private var rows: [ListRow] {
+        let unchecked: [ListRow] = items.filter { !$0.done }.map(ListRow.item)
+        let checked: [ListRow] = items.filter(\.done).map(ListRow.item)
+        return unchecked + [.newItem] + checked
+    }
+
+    private var order: [FocusTarget] {
+        [.title] + rows.map(\.target)
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 6) {
+                ListField(text: store.note(id)?.title ?? "",
+                          placeholder: "Untitled list",
+                          bold: true,
+                          isTitle: true,
+                          target: .title,
+                          focus: focus,
+                          onChange: { store.setTitle($0, for: id) },
+                          onCommand: { handle($0, at: .title) })
+                    .padding(.bottom, 2)
+
+                ForEach(rows) { row in
+                    rowView(row)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 4)
+        }
+        .padding(.top, max(16, StripButton.referenceSize.height) + 4)
+        // The strip is an overlay, not the first row of a stack: AppKit
+        // orders the scroll view's NSScrollView above views declared
+        // before it, and it reaches up under the transparent title bar,
+        // where it took the clicks meant for "−" and trash.
+        .overlay(alignment: .top) {
+            NoteStrip(onClose: onClose, onDelete: onDelete)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.ultraThinMaterial)
+        // Fill the transparent title bar too, as in note windows.
+        .ignoresSafeArea()
+    }
+
+    @ViewBuilder
+    private func rowView(_ row: ListRow) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            switch row {
+            case .item(let item):
+                CheckCircle(done: item.done) { toggle(item.id) }
+                ListField(text: item.text,
+                          placeholder: "",
+                          done: item.done,
+                          canToggle: true,
+                          target: .item(item.id),
+                          focus: focus,
+                          onChange: { store.setItemText($0, item: item.id, for: id) },
+                          onEndEditing: { removeIfEmpty(item.id) },
+                          onCommand: { handle($0, at: .item(item.id)) })
+                    .padding(.top, 3)
+            case .newItem:
+                // No circle: "New item" cannot be checked.
+                Color.clear.frame(width: 24, height: 24)
+                ListField(text: "",
+                          placeholder: "New item",
+                          target: .newItem,
+                          focus: focus,
+                          onChange: { text in
+                              guard !text.isEmpty else { return }
+                              focus.request = .item(store.appendItem(text, for: id))
+                          },
+                          onCommand: { handle($0, at: .newItem) })
+                    .padding(.top, 3)
+            }
+        }
+    }
+
+    private func toggle(_ itemID: UUID) {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            store.toggleItem(itemID, for: id)
+        }
+    }
+
+    /// An item left empty when it loses keyboard focus is removed.
+    private func removeIfEmpty(_ itemID: UUID) {
+        guard items.first(where: { $0.id == itemID })?.text.isEmpty == true else { return }
+        store.removeItem(itemID, for: id)
+    }
+
+    /// Handles a key a field passed up; returns false to let the field
+    /// edit as usual.
+    private func handle(_ command: ListCommand, at target: FocusTarget) -> Bool {
+        let targets = order
+        guard let index = targets.firstIndex(of: target) else { return false }
+        switch command {
+        case .returnKey:
+            switch target {
+            case .title:
+                let firstItem = items.first.map { FocusTarget.item($0.id) }
+                focus.request = firstItem ?? .newItem
+            case .item(let itemID):
+                if items.first(where: { $0.id == itemID })?.done == true {
+                    focus.request = .newItem
+                } else {
+                    focus.request = .item(store.insertItem(after: itemID, for: id))
+                }
+            case .newItem:
+                break
+            }
+            return true
+        case .deleteEmpty:
+            guard case .item(let itemID) = target, index > 0 else { return false }
+            store.removeItem(itemID, for: id)
+            focus.request = targets[index - 1]
+            return true
+        case .up:
+            guard index > 0 else { return false }
+            focus.request = targets[index - 1]
+            return true
+        case .down:
+            guard index + 1 < targets.count else { return false }
+            focus.request = targets[index + 1]
+            return true
+        case .toggle:
+            guard case .item(let itemID) = target else { return false }
+            toggle(itemID)
+            return true
+        }
+    }
+}
+
+/// A list's menu row title: its title after trimming whitespace, or
+/// "Untitled list" when that is empty.
+func listTitle(_ title: String?) -> String {
+    let trimmed = (title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? "Untitled list" : trimmed
 }
 
 /// A menu row's title: the first line of `text` that is not empty after
@@ -261,20 +810,28 @@ struct HoverHighlight: ViewModifier {
 struct MenuRow: View {
     @Environment(\.isEnabled) private var isEnabled
     let title: String
+    /// SF Symbol shown at the trailing edge, such as a list's icon.
+    var trailingSymbol: String? = nil
     let action: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
             Button(action: action) {
-                Text(title)
-                    .font(noteFont)
-                    .foregroundStyle(isEnabled ? HierarchicalShapeStyle.primary : .tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 14)
-                    .contentShape(Rectangle())
+                HStack(spacing: 8) {
+                    Text(title)
+                        .font(noteFont)
+                        .foregroundStyle(isEnabled ? HierarchicalShapeStyle.primary : .tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if let trailingSymbol {
+                        Image(systemName: trailingSymbol)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .modifier(HoverHighlight())
@@ -289,6 +846,7 @@ struct MenuView: View {
     @ObservedObject var store: NoteStore
     var onOpen: (UUID) -> Void
     var onNewNote: () -> Void
+    var onNewList: () -> Void
     @State private var showingChooser = false
 
     var body: some View {
@@ -312,14 +870,18 @@ struct MenuView: View {
                         onNewNote()
                         showingChooser = false
                     }
-                    // Placeholder for a later change.
-                    MenuRow(title: "+ New List") {}
-                        .disabled(true)
+                    MenuRow(title: "+ New List") {
+                        onNewList()
+                        showingChooser = false
+                    }
                 } else {
                     MenuRow(title: "+ New") { showingChooser = true }
                     // `add` appends, so reversed store order is newest first.
                     ForEach(Array(store.notes.reversed())) { note in
-                        MenuRow(title: noteTitle(note.text)) { onOpen(note.id) }
+                        MenuRow(title: note.isList ? listTitle(note.title) : noteTitle(note.text),
+                                trailingSymbol: note.isList ? "checklist" : nil) {
+                            onOpen(note.id)
+                        }
                     }
                 }
             }
@@ -348,6 +910,11 @@ func makeMainMenu() -> NSMenu {
     editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
     editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
     editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+    editMenu.addItem(.separator())
+    // Enabled only while a list item is edited (see `ListTextField`).
+    editMenu.addItem(withTitle: "Check Item",
+                     action: #selector(ListTextField.toggleChecklistItem(_:)),
+                     keyEquivalent: "\r")
 
     let appItem = NSMenuItem()
     appItem.submenu = appMenu
@@ -361,8 +928,8 @@ func makeMainMenu() -> NSMenu {
 }
 
 /// Moves `frame` the shortest distance (x and y only) to sit fully inside
-/// `screen`. Shared by `restoredFrame` (relaunch) and `addNote` (a new
-/// note placed near its source window), so both use the same rule.
+/// `screen`. Shared by `restoredFrame` (relaunch) and `newNoteFrame` (a
+/// new note or list placed next to the menu), so both use the same rule.
 func clamp(_ frame: NSRect, into screen: NSRect) -> NSPoint {
     NSPoint(x: min(max(frame.minX, screen.minX), screen.maxX - frame.width),
            y: min(max(frame.minY, screen.minY), screen.maxY - frame.height))
@@ -486,14 +1053,20 @@ final class MenuWindowDelegate: NSObject, NSWindowDelegate {
 }
 
 private extension NSView {
-    /// Depth-first search for the first `NSTextView` in this view's
-    /// hierarchy, used to focus a freshly created note's text editor.
-    var firstTextView: NSTextView? {
-        if let textView = self as? NSTextView { return textView }
+    /// Depth-first search for the first view of type `T` in this view's
+    /// hierarchy that matches `match`.
+    func firstDescendant<T: NSView>(_ type: T.Type, where match: (T) -> Bool = { _ in true }) -> T? {
+        if let view = self as? T, match(view) { return view }
         for subview in subviews {
-            if let found = subview.firstTextView { return found }
+            if let found = subview.firstDescendant(type, where: match) { return found }
         }
         return nil
+    }
+
+    /// The first `NSTextView`, used to focus a freshly created note's
+    /// text editor.
+    var firstTextView: NSTextView? {
+        firstDescendant(NSTextView.self)
     }
 }
 
@@ -536,12 +1109,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    /// Gives the note's scroll view overlay scrollers, which show only
-    /// while the user scrolls, whatever the system scroll bar setting.
-    /// SwiftUI builds the text view on a later run loop turn; when it is
-    /// not there yet, try once more on the next turn.
+    /// Gives the window's scroll view (a note's text editor, or a list's
+    /// rows) overlay scrollers, which show only while the user scrolls,
+    /// whatever the system scroll bar setting. SwiftUI builds the scroll
+    /// view on a later run loop turn; when it is not there yet, try once
+    /// more on the next turn.
     private func applyOverlayScroller(to window: NSWindow, retry: Bool = true) {
-        guard let scrollView = window.contentView?.firstTextView?.enclosingScrollView else {
+        guard let scrollView = window.contentView?.firstDescendant(NSScrollView.self) else {
             if retry {
                 DispatchQueue.main.async { [weak self, weak window] in
                     guard let window else { return }
@@ -614,7 +1188,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let hostingView = NSHostingView(rootView: MenuView(
             store: store,
             onOpen: { [weak self] id in self?.openNote(id) },
-            onNewNote: { [weak self] in self?.addNoteFromMenu() }
+            onNewNote: { [weak self] in self?.addFromMenu(list: false) },
+            onNewList: { [weak self] in self?.addFromMenu(list: true) }
         ))
         hostingView.sizingOptions = []
         window.contentView = hostingView
@@ -664,11 +1239,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // never offered as a tile or moved into a full-screen Space.
         window.collectionBehavior.formUnion([.fullScreenNone, .fullScreenDisallowsTiling])
 
-        let hostingView = NSHostingView(rootView: NoteView(
+        let hostingView = NSHostingView(rootView: WindowContent(
             store: store,
             id: note.id,
             onClose: { [weak self] in self?.closeNote(note.id) },
-            onDelete: { [weak self] in self?.removeNote(note.id) }
+            onDelete: { [weak self] in self?.confirmDelete(note.id) }
         ))
         // The window alone owns its size; SwiftUI's preferred size must
         // not pin it.
@@ -728,23 +1303,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                       height: min(frameSize.height, screen.height))
     }
 
-    /// Opens a new, empty note next to the menu window (see
-    /// `newNoteFrame`), and gives it keyboard focus.
-    private func addNoteFromMenu() {
+    /// Opens a new, empty note or list next to the menu window (see
+    /// `newNoteFrame`), and gives keyboard focus to the note's text or the
+    /// list's title.
+    private func addFromMenu(list: Bool) {
         guard let menuWindow else { return }
         let screen = menuWindow.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
         let frame = newNoteFrame(menu: menuWindow.frame, screen: screen)
 
-        let note = store.add(origin: NSStringFromPoint(frame.origin),
-                             size: NSStringFromSize(frame.size))
+        let origin = NSStringFromPoint(frame.origin)
+        let size = NSStringFromSize(frame.size)
+        let note = list ? store.addList(origin: origin, size: size) : store.add(origin: origin, size: size)
         let window = openWindow(for: note)
 
         window.makeKeyAndOrderFront(nil)
-        // The text view exists only after SwiftUI builds the hosting
-        // view's hierarchy, which happens on the next run loop turn.
+        // The editors exist only after SwiftUI builds the hosting view's
+        // hierarchy, which happens on the next run loop turn.
         DispatchQueue.main.async {
-            if let textView = window.contentView?.firstTextView {
-                window.makeFirstResponder(textView)
+            let editor: NSView? = list
+                ? window.contentView?.firstDescendant(ListTextField.self, where: \.isTitle)
+                : window.contentView?.firstTextView
+            if let editor {
+                window.makeFirstResponder(editor)
             }
         }
     }
@@ -777,6 +1357,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let window = detachWindow(id) else { return }
         store.setOpen(false, for: id)
         window.close()
+    }
+
+    /// Asks before deleting, in a sheet on the note's window. "Cancel" is
+    /// the default button, so Return and Esc never delete; only a click on
+    /// "Delete" does.
+    private func confirmDelete(_ id: UUID) {
+        guard let window = windows[id], window.attachedSheet == nil,
+              let note = store.note(id) else { return }
+        let name = note.isList ? listTitle(note.title) : noteTitle(note.text)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Delete “\(name)”?"
+        alert.informativeText = "This \(note.isList ? "list" : "note") will be deleted. You can't undo this."
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Delete").hasDestructiveAction = true
+        alert.beginSheetModal(for: window) { [weak self] response in
+            if response == .alertSecondButtonReturn {
+                self?.removeNote(id)
+            }
+        }
     }
 
     /// Deletes a note and closes its window at once. The app keeps
