@@ -204,6 +204,68 @@ final class NoteStore: ObservableObject {
     }
 }
 
+/// The two fonts the user can choose for note and list text.
+enum FontFamily: String {
+    case typewriter, system
+
+    /// Title of the font's entry in the font menu.
+    var menuTitle: String {
+        switch self {
+        case .typewriter: return "American Typewriter"
+        case .system: return "System"
+        }
+    }
+}
+
+/// The one font and text size for every note and list. Each change is
+/// saved to `UserDefaults` at once, under keys apart from `notes`, so a
+/// build without this setting still reads notes and ignores it.
+final class TextAppearance: ObservableObject {
+    static let sizeRange = 10...20
+    /// Menu rows follow the font choice but always keep this size.
+    static let menuSize: CGFloat = 15
+    private static let familyKey = "textFontFamily"
+    private static let sizeKey = "textFontSize"
+
+    @Published var family: FontFamily {
+        didSet { UserDefaults.standard.set(family.rawValue, forKey: Self.familyKey) }
+    }
+
+    /// Callers keep this within `sizeRange`; the slider cannot leave it.
+    @Published var size: Int {
+        didSet { UserDefaults.standard.set(size, forKey: Self.sizeKey) }
+    }
+
+    /// No saved setting means American Typewriter at 15 points. An
+    /// unknown font falls back to American Typewriter, and a size outside
+    /// `sizeRange` to the nearest limit.
+    init() {
+        let defaults = UserDefaults.standard
+        family = defaults.string(forKey: Self.familyKey).flatMap(FontFamily.init(rawValue:)) ?? .typewriter
+        let saved = defaults.object(forKey: Self.sizeKey) as? Int ?? 15
+        size = min(max(saved, Self.sizeRange.lowerBound), Self.sizeRange.upperBound)
+    }
+
+    /// The chosen font at `size`, for SwiftUI text.
+    func swiftUIFont(size: CGFloat) -> Font {
+        switch family {
+        case .typewriter: return .custom("American Typewriter", size: size)
+        case .system: return .system(size: size)
+        }
+    }
+
+    /// The chosen font at the chosen size, for AppKit text. Falls back to
+    /// the system font if American Typewriter is missing.
+    func nsFont(bold: Bool) -> NSFont {
+        let size = CGFloat(self.size)
+        if family == .typewriter,
+           let font = NSFont(name: bold ? "AmericanTypewriter-Bold" : "AmericanTypewriter", size: size) {
+            return font
+        }
+        return .systemFont(ofSize: size, weight: bold ? .bold : .regular)
+    }
+}
+
 /// A note's window: a titled, resizable window whose title bar is
 /// transparent and hidden, so the note keeps its own look while getting
 /// native resizing, corners, and shadow.
@@ -244,9 +306,10 @@ struct EndEditingView: NSViewRepresentable {
     }
 }
 
-/// A small borderless button for "−" and trash in the drag strip. It
-/// accepts the first click even while the app is not active, so one
-/// click works while another app is frontmost.
+/// A small borderless button for "−" and trash in the drag strip, and for
+/// the bottom bar's buttons. It accepts the first click even while the
+/// app is not active, so one click works while another app is frontmost.
+/// The action gets the button, to anchor a menu or popover on it.
 struct StripButton: NSViewRepresentable {
     final class FirstMouseButton: NSButton {
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -259,7 +322,7 @@ struct StripButton: NSViewRepresentable {
 
     let symbolName: String
     let accessibilityLabel: String
-    let action: () -> Void
+    let action: (NSButton) -> Void
 
     func makeNSView(context: Context) -> NSButton {
         let button = FirstMouseButton()
@@ -269,7 +332,7 @@ struct StripButton: NSViewRepresentable {
         button.image?.isTemplate = true
         button.setAccessibilityLabel(accessibilityLabel)
         button.target = context.coordinator
-        button.action = #selector(Coordinator.fire)
+        button.action = #selector(Coordinator.fire(_:))
         return button
     }
 
@@ -282,15 +345,11 @@ struct StripButton: NSViewRepresentable {
     }
 
     final class Coordinator: NSObject {
-        var action: () -> Void
-        init(action: @escaping () -> Void) { self.action = action }
-        @objc func fire() { action() }
+        var action: (NSButton) -> Void
+        init(action: @escaping (NSButton) -> Void) { self.action = action }
+        @objc func fire(_ sender: NSButton) { action(sender) }
     }
 }
-
-/// Typeface for note text and its placeholder, at the macOS body text
-/// size. One value for both keeps the placeholder in step with the text.
-let noteFont = Font.custom("American Typewriter", size: 15, relativeTo: .body)
 
 /// Height of the top and bottom bars: the buttons plus a margin around
 /// them.
@@ -318,10 +377,10 @@ struct NoteStrip: View {
             // mistaken for a delete.
             HStack(spacing: 16) {
                 Spacer(minLength: 0)
-                StripButton(symbolName: "minus", accessibilityLabel: "Close Note", action: onClose)
+                StripButton(symbolName: "minus", accessibilityLabel: "Close Note", action: { _ in onClose() })
                     .frame(width: StripButton.referenceSize.width,
                            height: StripButton.referenceSize.height)
-                StripButton(symbolName: "trash", accessibilityLabel: "Delete Note", action: onDelete)
+                StripButton(symbolName: "trash", accessibilityLabel: "Delete Note", action: { _ in onDelete() })
                     .frame(width: StripButton.referenceSize.width,
                            height: StripButton.referenceSize.height)
             }
@@ -338,13 +397,121 @@ struct NoteStrip: View {
 let bottomBarHeight = (barHeight * 0.8).rounded()
 
 /// The bottom bar of note and list windows: drags the window and ends
-/// editing. Empty for now; later controls go here.
+/// editing, with the font button and the text size button at the
+/// trailing edge.
 struct BottomBar: View {
+    @ObservedObject var appearance: TextAppearance
+    @StateObject private var controls = AppearanceControls()
+
     var body: some View {
-        EndEditingView(drags: true)
-            .frame(minWidth: 0, maxWidth: .infinity)
-            .frame(height: bottomBarHeight)
-            .background(barFill)
+        // The buttons sit on top of the click target, as in the top bar.
+        ZStack {
+            EndEditingView(drags: true)
+            HStack(spacing: 16) {
+                Spacer(minLength: 0)
+                StripButton(symbolName: "textformat", accessibilityLabel: "Font") { button in
+                    controls.appearance = appearance
+                    controls.showFontMenu(from: button)
+                }
+                .frame(width: StripButton.referenceSize.width,
+                       height: StripButton.referenceSize.height)
+                StripButton(symbolName: "textformat.size", accessibilityLabel: "Text Size") { button in
+                    controls.appearance = appearance
+                    controls.toggleSizePopover(from: button)
+                }
+                .frame(width: StripButton.referenceSize.width,
+                       height: StripButton.referenceSize.height)
+            }
+            .padding(.trailing, 12)
+        }
+        .frame(minWidth: 0, maxWidth: .infinity)
+        .frame(height: bottomBarHeight)
+        .background(barFill)
+    }
+}
+
+/// Opens the bottom bar's font menu and text size popover. A class, so
+/// the open popover outlives view updates.
+final class AppearanceControls: NSObject, ObservableObject, NSPopoverDelegate {
+    var appearance: TextAppearance?
+    private var popover: NSPopover?
+    /// When the size popover last closed. A transient popover closes on
+    /// the mouse-down of the click on its own button, before the button's
+    /// action runs; that click must not open it again.
+    private var popoverClosedAt = Date.distantPast
+
+    func showFontMenu(from button: NSButton) {
+        guard let appearance else { return }
+        let menu = NSMenu()
+        for family in [FontFamily.typewriter, .system] {
+            let item = NSMenuItem(title: family.menuTitle, action: #selector(chooseFamily(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = family.rawValue
+            item.state = family == appearance.family ? .on : .off
+            menu.addItem(item)
+        }
+        // Below the button; AppKit moves the menu up if it would leave
+        // the screen.
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+    }
+
+    @objc private func chooseFamily(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let family = FontFamily(rawValue: raw),
+              appearance?.family != family else { return }
+        appearance?.family = family
+    }
+
+    func toggleSizePopover(from button: NSButton) {
+        if let popover, popover.isShown {
+            popover.performClose(nil)
+            return
+        }
+        guard let appearance, Date().timeIntervalSince(popoverClosedAt) > 0.3 else { return }
+        let controller = NSHostingController(rootView: SizePopover(appearance: appearance))
+        controller.sizingOptions = .preferredContentSize
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = controller
+        popover.delegate = self
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
+        self.popover = popover
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        popover = nil
+        popoverClosedAt = Date()
+    }
+}
+
+/// The text size popover: a slider from 10 to 20 points that changes
+/// every note and list while the user drags, and the size in points.
+struct SizePopover: View {
+    @ObservedObject var appearance: TextAppearance
+
+    private var size: Binding<Double> {
+        Binding(
+            get: { Double(appearance.size) },
+            set: { appearance.size = Int($0.rounded()) }
+        )
+    }
+
+    var body: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 8) {
+                Text("A").font(.system(size: 10))
+                Slider(value: size,
+                       in: Double(TextAppearance.sizeRange.lowerBound)...Double(TextAppearance.sizeRange.upperBound),
+                       step: 1)
+                    .accessibilityLabel("Text Size")
+                Text("A").font(.system(size: 18))
+            }
+            Text("\(appearance.size) pt")
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .frame(width: 220)
     }
 }
 
@@ -352,21 +519,23 @@ struct BottomBar: View {
 /// for everything else.
 struct WindowContent: View {
     @ObservedObject var store: NoteStore
+    let appearance: TextAppearance
     let id: UUID
     var onClose: () -> Void
     var onDelete: () -> Void
 
     var body: some View {
         if store.note(id)?.isList == true {
-            ListView(store: store, id: id, onClose: onClose, onDelete: onDelete)
+            ListView(store: store, appearance: appearance, id: id, onClose: onClose, onDelete: onDelete)
         } else {
-            NoteView(store: store, id: id, onClose: onClose, onDelete: onDelete)
+            NoteView(store: store, appearance: appearance, id: id, onClose: onClose, onDelete: onDelete)
         }
     }
 }
 
 struct NoteView: View {
     @ObservedObject var store: NoteStore
+    @ObservedObject var appearance: TextAppearance
     let id: UUID
     var onClose: () -> Void
     var onDelete: () -> Void
@@ -379,14 +548,16 @@ struct NoteView: View {
     }
 
     var body: some View {
+        // One font for the text and its placeholder keeps them in step.
+        let font = appearance.swiftUIFont(size: CGFloat(appearance.size))
         ZStack(alignment: .topLeading) {
             TextEditor(text: text)
                 .scrollContentBackground(.hidden)
-                .font(noteFont)
+                .font(font)
 
             if text.wrappedValue.isEmpty {
                 Text("Type a note…")
-                    .font(noteFont)
+                    .font(font)
                     .foregroundStyle(Color(nsColor: .textColor))
                     .padding(.top, 8)
                     .padding(.leading, 5)
@@ -403,7 +574,7 @@ struct NoteView: View {
             NoteStrip(onClose: onClose, onDelete: onDelete)
         }
         .overlay(alignment: .bottom) {
-            BottomBar()
+            BottomBar(appearance: appearance)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.ultraThinMaterial)
@@ -457,7 +628,7 @@ final class ListTextField: NSTextField {
 struct ListField: NSViewRepresentable {
     let text: String
     let placeholder: String
-    var bold = false
+    let font: NSFont
     var done = false
     var isTitle = false
     var canToggle = false
@@ -467,22 +638,24 @@ struct ListField: NSViewRepresentable {
     var onEndEditing: () -> Void = {}
     var onCommand: (ListCommand) -> Bool = { _ in false }
 
-    static func font(bold: Bool) -> NSFont {
-        NSFont(name: bold ? "AmericanTypewriter-Bold" : "AmericanTypewriter", size: 15)
-            ?? .systemFont(ofSize: 15, weight: bold ? .bold : .regular)
-    }
-
     /// All list text, placeholders included, is white in dark appearance
     /// and black in light appearance; checked items are struck through.
-    static func styled(_ text: String, bold: Bool, done: Bool) -> NSAttributedString {
+    static func styled(_ text: String, font: NSFont, done: Bool) -> NSAttributedString {
         var attributes: [NSAttributedString.Key: Any] = [
-            .font: font(bold: bold),
+            .font: font,
             .foregroundColor: NSColor.textColor,
         ]
         if done {
             attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
         }
         return NSAttributedString(string: text, attributes: attributes)
+    }
+
+    static func placeholderString(_ placeholder: String, font: NSFont) -> NSAttributedString {
+        NSAttributedString(string: placeholder, attributes: [
+            .font: font,
+            .foregroundColor: NSColor.textColor,
+        ])
     }
 
     func makeNSView(context: Context) -> ListTextField {
@@ -497,12 +670,9 @@ struct ListField: NSViewRepresentable {
         field.cell?.isScrollable = false
         field.lineBreakMode = .byWordWrapping
         field.maximumNumberOfLines = 0
-        field.font = Self.font(bold: bold)
+        field.font = font
         field.textColor = .textColor
-        field.placeholderAttributedString = NSAttributedString(string: placeholder, attributes: [
-            .font: Self.font(bold: bold),
-            .foregroundColor: NSColor.textColor,
-        ])
+        field.placeholderAttributedString = Self.placeholderString(placeholder, font: font)
         field.delegate = context.coordinator
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         return field
@@ -518,6 +688,19 @@ struct ListField: NSViewRepresentable {
             field.onToggle = nil
         }
 
+        // The text appearance setting changed: restyle in place. The field
+        // editor keeps its text, caret, and undo history; only its font
+        // changes.
+        if field.font != font {
+            field.font = font
+            field.placeholderAttributedString = Self.placeholderString(placeholder, font: font)
+            if let editor = field.currentEditor() as? NSTextView {
+                editor.font = font
+                editor.typingAttributes[.font] = font
+            }
+            field.invalidateIntrinsicContentSize()
+        }
+
         if let editor = field.currentEditor() as? NSTextView {
             // While editing, the store already holds the typed text; only
             // an outside change (the "New item" row turning into an item)
@@ -526,7 +709,7 @@ struct ListField: NSViewRepresentable {
                 editor.string = text
             }
         } else {
-            field.attributedStringValue = Self.styled(text, bold: bold, done: done)
+            field.attributedStringValue = Self.styled(text, font: font, done: done)
         }
 
         if focus.request == target {
@@ -550,7 +733,7 @@ struct ListField: NSViewRepresentable {
         // Without this the field's intrinsic width is its text on one
         // line, which can push the window's content wider than the window.
         nsView.preferredMaxLayoutWidth = width
-        cell.attributedStringValue = Self.styled(text.isEmpty ? " " : text, bold: bold, done: done)
+        cell.attributedStringValue = Self.styled(text.isEmpty ? " " : text, font: font, done: done)
         let size = cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: width,
                                                    height: .greatestFiniteMagnitude))
         return CGSize(width: width, height: ceil(size.height))
@@ -579,7 +762,7 @@ struct ListField: NSViewRepresentable {
         /// the field, dropping the checked style; restyle it at once.
         func controlTextDidEndEditing(_ notification: Notification) {
             if let field = notification.object as? NSTextField {
-                field.attributedStringValue = ListField.styled(field.stringValue, bold: parent.bold,
+                field.attributedStringValue = ListField.styled(field.stringValue, font: parent.font,
                                                                done: parent.done)
             }
             parent.onEndEditing()
@@ -680,6 +863,7 @@ enum ListRow: Identifiable {
 /// the "New item" row between unchecked and checked items.
 struct ListView: View {
     @ObservedObject var store: NoteStore
+    @ObservedObject var appearance: TextAppearance
     let id: UUID
     var onClose: () -> Void
     var onDelete: () -> Void
@@ -705,6 +889,7 @@ struct ListView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     ListField(text: store.note(id)?.title ?? "",
                               placeholder: "Untitled list",
+                              font: appearance.nsFont(bold: true),
                               isTitle: true,
                               target: .title,
                               focus: focus,
@@ -735,7 +920,7 @@ struct ListView: View {
             NoteStrip(onClose: onClose, onDelete: onDelete)
         }
         .overlay(alignment: .bottom) {
-            BottomBar()
+            BottomBar(appearance: appearance)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.ultraThinMaterial)
@@ -751,6 +936,7 @@ struct ListView: View {
                 CheckCircle(done: item.done) { toggle(item.id) }
                 ListField(text: item.text,
                           placeholder: "",
+                          font: appearance.nsFont(bold: false),
                           done: item.done,
                           canToggle: true,
                           target: .item(item.id),
@@ -764,6 +950,7 @@ struct ListView: View {
                 Color.clear.frame(width: 24, height: 24)
                 ListField(text: "",
                           placeholder: "New item",
+                          font: appearance.nsFont(bold: false),
                           target: .newItem,
                           focus: focus,
                           onChange: { text in
@@ -863,6 +1050,7 @@ struct HoverHighlight: ViewModifier {
 struct MenuRow: View {
     @Environment(\.isEnabled) private var isEnabled
     let title: String
+    let font: Font
     /// SF Symbol shown at the trailing edge, such as a list's icon.
     var trailingSymbol: String? = nil
     let action: () -> Void
@@ -872,7 +1060,7 @@ struct MenuRow: View {
             Button(action: action) {
                 HStack(spacing: 8) {
                     Text(title)
-                        .font(noteFont)
+                        .font(font)
                         .foregroundStyle(isEnabled ? HierarchicalShapeStyle.primary : .tertiary)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -897,12 +1085,15 @@ struct MenuRow: View {
 /// The chooser is view state only, so the menu always opens on the list.
 struct MenuView: View {
     @ObservedObject var store: NoteStore
+    @ObservedObject var appearance: TextAppearance
     var onOpen: (UUID) -> Void
     var onNewNote: () -> Void
     var onNewList: () -> Void
     @State private var showingChooser = false
 
     var body: some View {
+        // Rows follow the font choice at a fixed size.
+        let font = appearance.swiftUIFont(size: TextAppearance.menuSize)
         ScrollView {
             VStack(spacing: 0) {
                 if showingChooser {
@@ -919,19 +1110,20 @@ struct MenuView: View {
                         .accessibilityLabel("Back")
                     }
                     Divider()
-                    MenuRow(title: "+ New Note") {
+                    MenuRow(title: "+ New Note", font: font) {
                         onNewNote()
                         showingChooser = false
                     }
-                    MenuRow(title: "+ New List") {
+                    MenuRow(title: "+ New List", font: font) {
                         onNewList()
                         showingChooser = false
                     }
                 } else {
-                    MenuRow(title: "+ New") { showingChooser = true }
+                    MenuRow(title: "+ New", font: font) { showingChooser = true }
                     // `add` appends, so reversed store order is newest first.
                     ForEach(Array(store.notes.reversed())) { note in
                         MenuRow(title: note.isList ? listTitle(note.title) : noteTitle(note.text),
+                                font: font,
                                 trailingSymbol: note.isList ? "checklist" : nil) {
                             onOpen(note.id)
                         }
@@ -1126,6 +1318,7 @@ private extension NSView {
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let store = NoteStore()
+    let appearance = TextAppearance()
     var windows: [UUID: NoteWindow] = [:]
     var menuWindow: NSWindow?
     /// Window delegates are weak; this keeps the menu's alive.
@@ -1241,6 +1434,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let hostingView = NSHostingView(rootView: MenuView(
             store: store,
+            appearance: appearance,
             onOpen: { [weak self] id in self?.openNote(id) },
             onNewNote: { [weak self] in self?.addFromMenu(list: false) },
             onNewList: { [weak self] in self?.addFromMenu(list: true) }
@@ -1295,6 +1489,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let hostingView = NSHostingView(rootView: WindowContent(
             store: store,
+            appearance: appearance,
             id: note.id,
             onClose: { [weak self] in self?.closeNote(note.id) },
             onDelete: { [weak self] in self?.confirmDelete(note.id) }

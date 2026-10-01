@@ -68,15 +68,19 @@ The text of every note SHALL persist across app quit and relaunch. Changes MUST 
 - **THEN** the next launch shows that note's full text including the last keystroke
 
 ### Requirement: Panel stays movable
-The user SHALL be able to move the panel by dragging a visible area that is not the text. Every note window MUST show a drag area across its top edge and a bottom bar across its bottom edge. Both MUST span the full width of the window. The bottom bar MUST be 20% lower than the drag area. Both MUST show a shaded fill that sets them apart from the note area: darker than the note area in light appearance and lighter in dark appearance. The drag area MUST NOT show a grip mark. The bottom bar MUST show no controls. Dragging the drag area or the bottom bar MUST move the panel. The note area MUST end above the bottom bar, so no note text shows under it. Dragging inside the text MUST select text and MUST NOT move the panel.
+The user SHALL be able to move the panel by dragging a visible area that is not the text. Every note window MUST show a drag area across its top edge and a bottom bar across its bottom edge. Both MUST span the full width of the window. The bottom bar MUST be 20% lower than the drag area. Both MUST show a shaded fill that sets them apart from the note area: darker than the note area in light appearance and lighter in dark appearance. The drag area MUST NOT show a grip mark. The bottom bar MUST show only the font button and the text size button, at its trailing edge. Dragging the drag area, or the bottom bar outside its buttons, MUST move the panel. The note area MUST end above the bottom bar, so no note text shows under it. Dragging inside the text MUST select text and MUST NOT move the panel.
 
 #### Scenario: Drag the drag area
 - **WHEN** the user drags the panel's drag area
 - **THEN** the panel moves with the pointer
 
 #### Scenario: Drag the bottom bar
-- **WHEN** the user drags the panel's bottom bar
+- **WHEN** the user drags the panel's bottom bar outside its buttons
 - **THEN** the panel moves with the pointer
+
+#### Scenario: Bottom bar controls
+- **WHEN** a note window is open
+- **THEN** its bottom bar shows the font button and the text size button at the trailing edge, and no other controls
 
 #### Scenario: Drag inside text
 - **WHEN** the user drags across text in the note area
@@ -134,18 +138,26 @@ Every note window SHALL stack with other applications' windows as a normal windo
 - **THEN** that note window is not visible on the other Space
 
 ### Requirement: Note typeface
-Every note area SHALL show its note text in the American Typewriter typeface, at 15 points. The placeholder text of an empty note area MUST use the same typeface and size, and MUST start at the position where the first typed character appears. The placeholder MUST use the same color as note text: white in dark appearance and black in light appearance.
+Every note area SHALL show its note text in the font and at the size of the text appearance setting: American Typewriter or the macOS system font, at 10 to 20 points, with American Typewriter at 15 points when the user has not changed the setting. The placeholder text of an empty note area MUST use the same typeface and size as note text, and MUST start at the position where the first typed character appears, at every font and size. The placeholder MUST use the same color as note text: white in dark appearance and black in light appearance.
+
+#### Scenario: Typed text uses the chosen font
+- **WHEN** the font setting is "System" at 12 points and the user types text in a note area
+- **THEN** the text shows in the system font at 12 points
 
 #### Scenario: Typed text uses American Typewriter
-- **WHEN** the user types text in a note area
+- **WHEN** the user has never changed the text appearance setting and types text in a note area
 - **THEN** the text shows in American Typewriter at 15 points
 
 #### Scenario: Placeholder uses American Typewriter
-- **WHEN** a note area is empty
+- **WHEN** the user has never changed the text appearance setting and a note area is empty
 - **THEN** the placeholder text shows in American Typewriter at the same size as note text
 
+#### Scenario: Placeholder uses the note font
+- **WHEN** the font setting is "System" at 12 points and a note area is empty
+- **THEN** the placeholder text shows in the system font at 12 points
+
 #### Scenario: Placeholder lines up with the caret
-- **WHEN** a note area is empty and has keyboard focus
+- **WHEN** a note area is empty and has keyboard focus, at any font and size
 - **THEN** the caret shows at the start of the placeholder text's first line
 
 #### Scenario: Placeholder color
@@ -153,8 +165,8 @@ Every note area SHALL show its note text in the American Typewriter typeface, at
 - **THEN** the placeholder shows white in dark appearance and black in light appearance
 
 #### Scenario: Saved text after upgrade
-- **WHEN** the app launches with notes saved by a version that used the system font
-- **THEN** every note shows its saved text unchanged, in American Typewriter
+- **WHEN** the app launches with notes saved by an earlier version
+- **THEN** every note shows its saved text unchanged, in the font and size of the text appearance setting
 
 ### Requirement: Scroll bar shows only while scrolling
 The scroll bar of every note area SHALL be hidden while the user is not scrolling that note area. When the user scrolls a note area whose text is longer than the visible area, that note area MUST show its scroll bar over the text, and MUST hide the scroll bar again after scrolling stops. This behavior MUST NOT depend on the macOS "Show scroll bars" setting or on the connected pointing device, and MUST stay the same when either changes while the app runs. The note area MUST keep scrolling with the trackpad, the mouse wheel, and caret movement.
