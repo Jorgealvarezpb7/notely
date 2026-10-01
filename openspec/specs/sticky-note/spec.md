@@ -139,7 +139,11 @@ The scroll bar of every note area SHALL be hidden while the user is not scrollin
 - **THEN** every open note area still hides its scroll bar until the user scrolls it
 
 #### Scenario: New note
-- **WHEN** the user creates a note with "+" and types text longer than its visible note area
+- **WHEN** the user creates a note with "+ New Note" in the menu and types text longer than its visible note area
+- **THEN** that note area shows no scroll bar until the user scrolls it
+
+#### Scenario: Reopened note
+- **WHEN** the user closes a long note with "−" and opens it again from the menu
 - **THEN** that note area shows no scroll bar until the user scrolls it
 
 #### Scenario: Scroll with the caret

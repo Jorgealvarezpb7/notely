@@ -1,10 +1,6 @@
-# app-controls Specification
+# Spec Delta
 
-## Purpose
-
-Gives the note app a Dock icon, an app icon, and standard ways to quit: the app menu, the Dock icon's menu, and Cmd+Q.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Quit from keyboard
 While any note panel or the menu window has keyboard focus, Cmd+Q SHALL quit the app. When a window of another application has keyboard focus, Cmd+Q MUST NOT quit the app.
@@ -51,14 +47,3 @@ While the app runs, the Dock SHALL show the app's icon. While the app is active,
 #### Scenario: Click Dock icon with menu minimized
 - **WHEN** the menu window is minimized and the user clicks the Dock icon
 - **THEN** the menu window is restored from the Dock and shows in front
-
-### Requirement: App icon
-The app SHALL use the supplied Notely artwork (a pink rounded square with a black quoted "N") as its icon. The icon MUST show in the Dock, in Finder, and in the application switcher, and MUST look sharp at every standard macOS icon size.
-
-#### Scenario: Icon in Finder
-- **WHEN** the user opens the folder that contains the installed app in Finder
-- **THEN** the app shows the Notely icon, not the generic application icon
-
-#### Scenario: Icon in application switcher
-- **WHEN** the app runs and the user presses Cmd+Tab
-- **THEN** the application switcher shows the Notely icon
