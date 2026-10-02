@@ -1,4 +1,5 @@
 import AppKit
+import LinkPresentation
 import SwiftUI
 
 /// One checklist item. A list's `items` are kept in display order: the
@@ -863,12 +864,344 @@ struct StyleButtons: View {
     }
 }
 
+// MARK: Links
+
+/// A web address found in text, and where.
+struct DetectedLink {
+    let range: NSRange
+    let url: URL
+}
+
+/// Finds web addresses in text. Only http and https links count: the
+/// detector gives a bare domain such as "apple.com" an http scheme, and an
+/// email address a mailto scheme, which is dropped.
+enum LinkDetector {
+    private static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+
+    static func links(in text: String) -> [DetectedLink] {
+        guard let detector, !text.isEmpty else { return [] }
+        let range = NSRange(location: 0, length: (text as NSString).length)
+        return detector.matches(in: text, range: range).compactMap { match in
+            guard let url = match.url,
+                  let scheme = url.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https" else { return nil }
+            return DetectedLink(range: match.range, url: url)
+        }
+    }
+}
+
+/// Link color and underline, as list rows and text views show links.
+let linkDisplayAttributes: [NSAttributedString.Key: Any] = [
+    .foregroundColor: NSColor.linkColor,
+    .underlineStyle: NSUnderlineStyle.single.rawValue,
+]
+
+extension NSTextView {
+    /// Shows every web address in the text as a link and returns them.
+    /// The link look lives in the layout manager (rendering attributes on
+    /// TextKit 2, temporary attributes on TextKit 1), never in the text
+    /// storage, so saved text and styles, undo, and copy do not change.
+    /// Never reads `layoutManager` on a TextKit 2 view: that would switch
+    /// the view to TextKit 1 for good.
+    func showLinks() -> [DetectedLink] {
+        let links = LinkDetector.links(in: string)
+        if let textLayoutManager {
+            let document = textLayoutManager.documentRange
+            textLayoutManager.removeRenderingAttribute(.foregroundColor, for: document)
+            textLayoutManager.removeRenderingAttribute(.underlineStyle, for: document)
+            for link in links {
+                guard let start = textLayoutManager.location(document.location, offsetBy: link.range.location),
+                      let end = textLayoutManager.location(start, offsetBy: link.range.length),
+                      let range = NSTextRange(location: start, end: end) else { continue }
+                for (key, value) in linkDisplayAttributes {
+                    textLayoutManager.addRenderingAttribute(key, value: value, for: range)
+                }
+            }
+        } else if let layoutManager {
+            let full = NSRange(location: 0, length: (string as NSString).length)
+            layoutManager.removeTemporaryAttribute(.foregroundColor, forCharacterRange: full)
+            layoutManager.removeTemporaryAttribute(.underlineStyle, forCharacterRange: full)
+            for link in links {
+                layoutManager.addTemporaryAttributes(linkDisplayAttributes, forCharacterRange: link.range)
+            }
+        }
+        needsDisplay = true
+        return links
+    }
+
+    /// The link of `links` under `point` (view coordinates), with the rect
+    /// of the line piece under the point. Uses only text input APIs, which
+    /// work on TextKit 1 and 2.
+    func link(in links: [DetectedLink], at point: NSPoint) -> (url: URL, rect: NSRect)? {
+        guard !links.isEmpty, let window else { return nil }
+        let index = characterIndexForInsertion(at: point)
+        for link in links where NSLocationInRange(index, link.range)
+            || (index > 0 && NSLocationInRange(index - 1, link.range)) {
+            // A link can wrap over several lines; check each line's piece.
+            var location = link.range.location
+            let end = NSMaxRange(link.range)
+            while location < end {
+                var actual = NSRange(location: NSNotFound, length: 0)
+                let screenRect = firstRect(forCharacterRange: NSRange(location: location, length: end - location),
+                                           actualRange: &actual)
+                guard actual.location != NSNotFound, actual.length > 0 else { break }
+                let rect = convert(window.convertFromScreen(screenRect), from: nil)
+                if rect.contains(point) { return (link.url, rect) }
+                location = NSMaxRange(actual)
+            }
+        }
+        return nil
+    }
+}
+
+/// A view that shows links: note text views, the list field editor, and
+/// list rows that are not being edited.
+protocol LinkHost: NSView {
+    /// The link under `point`, in this view's coordinates, and its rect.
+    func link(at point: NSPoint) -> (url: URL, rect: NSRect)?
+}
+
+extension LinkHost {
+    /// Opens the link under a Cmd+click and returns true; returns false
+    /// for any other click, which the view then handles as usual.
+    func openLink(for event: NSEvent) -> Bool {
+        guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command),
+              let link = link(at: convert(event.locationInWindow, from: nil)) else { return false }
+        LinkHoverController.shared.reset()
+        NSWorkspace.shared.open(link.url)
+        return true
+    }
+}
+
+/// Watches Cmd and the pointer while Notely is active. With Cmd held over
+/// a link, shows the pointing hand and, after half a second, the link's
+/// preview card. Scrolling, typing, clicking, releasing Cmd, leaving the
+/// link, or switching apps closes the card.
+final class LinkHoverController {
+    static let shared = LinkHoverController()
+
+    private var monitor: Any?
+    private weak var host: NSView?
+    private var url: URL?
+    private var rect: NSRect = .zero
+    private var timer: Timer?
+    private var popover: NSPopover?
+
+    /// True while Cmd is held over a link; hosts keep the pointing hand.
+    var isActive: Bool { url != nil && host != nil }
+
+    func start() {
+        guard monitor == nil else { return }
+        // A local monitor sees events only while Notely is active.
+        monitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.flagsChanged, .mouseMoved, .scrollWheel, .keyDown, .leftMouseDown, .rightMouseDown]
+        ) { [weak self] event in
+            self?.handle(event)
+            return event
+        }
+        NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification,
+                                               object: nil, queue: .main) { [weak self] _ in
+            self?.reset()
+        }
+    }
+
+    private func handle(_ event: NSEvent) {
+        switch event.type {
+        case .flagsChanged, .mouseMoved:
+            update(commandHeld: event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command))
+        default:
+            reset()
+        }
+    }
+
+    /// The link host under the pointer, if any, and the link there.
+    private func hostAndLink() -> (host: LinkHost, link: (url: URL, rect: NSRect)?)? {
+        let screenPoint = NSEvent.mouseLocation
+        let number = NSWindow.windowNumber(at: screenPoint, belowWindowWithWindowNumber: 0)
+        guard let window = NSApp.window(withWindowNumber: number),
+              let content = window.contentView else { return nil }
+        let windowPoint = window.convertPoint(fromScreen: screenPoint)
+        var view = content.hitTest(content.superview?.convert(windowPoint, from: nil) ?? windowPoint)
+        while let current = view {
+            if let host = current as? LinkHost {
+                return (host, host.link(at: host.convert(windowPoint, from: nil)))
+            }
+            view = current.superview
+        }
+        return nil
+    }
+
+    private func update(commandHeld: Bool) {
+        let found = commandHeld ? hostAndLink() : nil
+        guard let found, let link = found.link else {
+            let wasActive = isActive
+            reset()
+            // Cmd released or the pointer left the link without moving
+            // onto other text: put the text pointer back at once.
+            if wasActive {
+                (hostAndLink() != nil ? NSCursor.iBeam : NSCursor.arrow).set()
+            }
+            return
+        }
+        if host === found.host, url == link.url, rect == link.rect {
+            applyCursor()
+            return
+        }
+        reset()
+        host = found.host
+        url = link.url
+        rect = link.rect
+        applyCursor()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self] _ in
+            self?.showPreview()
+        }
+    }
+
+    /// Text views set the I-beam in their own handling of the same event,
+    /// which runs after this monitor; set the hand again after it.
+    private func applyCursor() {
+        NSCursor.pointingHand.set()
+        DispatchQueue.main.async { [weak self] in
+            if self?.isActive == true { NSCursor.pointingHand.set() }
+        }
+    }
+
+    private func showPreview() {
+        guard let host, let url, host.window != nil else { return }
+        let controller = LinkPreviewViewController(url: url)
+        let popover = NSPopover()
+        popover.behavior = .applicationDefined
+        popover.animates = false
+        popover.contentViewController = controller
+        controller.onResize = { [weak popover] size in
+            popover?.contentSize = size
+        }
+        // A popover never becomes key, so keyboard focus stays put.
+        popover.show(relativeTo: rect, of: host, preferredEdge: .maxY)
+        self.popover = popover
+        LinkPreviewStore.shared.metadata(for: url) { [weak controller] metadata in
+            controller?.show(metadata)
+        }
+    }
+
+    /// Closes the card and forgets the link.
+    func reset() {
+        timer?.invalidate()
+        timer = nil
+        popover?.close()
+        popover = nil
+        host = nil
+        url = nil
+    }
+}
+
+/// Page previews for the session: fetched only when a card is about to
+/// show, at most one request per address at a time, and kept until quit.
+/// A failed request is not kept, so a later preview tries again.
+final class LinkPreviewStore {
+    static let shared = LinkPreviewStore()
+
+    private var cache: [URL: LPLinkMetadata] = [:]
+    private var providers: [URL: LPMetadataProvider] = [:]
+    private var waiting: [URL: [(LPLinkMetadata) -> Void]] = [:]
+
+    func metadata(for url: URL, completion: @escaping (LPLinkMetadata) -> Void) {
+        if let metadata = cache[url] {
+            completion(metadata)
+            return
+        }
+        waiting[url, default: []].append(completion)
+        guard providers[url] == nil else { return }
+        let provider = LPMetadataProvider()
+        provider.timeout = 10
+        providers[url] = provider
+        provider.startFetchingMetadata(for: url) { metadata, _ in
+            DispatchQueue.main.async {
+                self.providers[url] = nil
+                let callbacks = self.waiting.removeValue(forKey: url) ?? []
+                guard let metadata else { return }
+                self.cache[url] = metadata
+                callbacks.forEach { $0(metadata) }
+            }
+        }
+    }
+}
+
+/// The preview card's content: the system link preview, showing the
+/// address until the page's title, site, and image arrive.
+final class LinkPreviewViewController: NSViewController {
+    static let width: CGFloat = 300
+    /// Height of the caption under a preview image: title and site.
+    static let captionHeight: CGFloat = 64
+
+    private let linkView: LPLinkView
+    private var heightConstraint: NSLayoutConstraint?
+    /// Called with the new size whenever the card changes height. An open
+    /// popover keeps the size it opened with, so its owner resizes it.
+    var onResize: ((NSSize) -> Void)?
+
+    init(url: URL) {
+        linkView = LPLinkView(url: url)
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not used")
+    }
+
+    /// The link view fills a container of fixed size, so it lays out for
+    /// the card's height rather than its own guess.
+    override func loadView() {
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: Self.width, height: 80))
+        linkView.translatesAutoresizingMaskIntoConstraints = false
+        for orientation in [NSLayoutConstraint.Orientation.horizontal, .vertical] {
+            linkView.setContentHuggingPriority(.defaultLow, for: orientation)
+            linkView.setContentCompressionResistancePriority(.defaultLow, for: orientation)
+        }
+        container.addSubview(linkView)
+        let height = container.heightAnchor.constraint(equalToConstant: 80)
+        NSLayoutConstraint.activate([
+            linkView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            linkView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            linkView.topAnchor.constraint(equalTo: container.topAnchor),
+            linkView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            container.widthAnchor.constraint(equalToConstant: Self.width),
+            height,
+        ])
+        heightConstraint = height
+        view = container
+        resize()
+    }
+
+    func show(_ metadata: LPLinkMetadata) {
+        linkView.metadata = metadata
+        resize(hasImage: metadata.imageProvider != nil || metadata.videoProvider != nil)
+    }
+
+    /// Fixed width. A page with an image gets a standard height: the image
+    /// at the 1.91:1 shape of page preview images, plus the caption.
+    /// Without an image, the link view's own height, 80 points at least.
+    private func resize(hasImage: Bool = false) {
+        let height: CGFloat
+        if hasImage {
+            height = (Self.width / 1.91).rounded() + Self.captionHeight
+        } else {
+            let natural = linkView.intrinsicContentSize.height
+            height = natural != NSView.noIntrinsicMetric ? max(natural, 80) : 80
+        }
+        let size = NSSize(width: Self.width, height: height)
+        heightConstraint?.constant = height
+        preferredContentSize = size
+        onResize?(size)
+    }
+}
+
 /// A note's text view. Text carries bold and italic as trait attributes
 /// and underline as `underlineStyle`; `restyle` derives the font, slant,
 /// and color from the traits and the text appearance setting, so a font
 /// or size change keeps every style. AppKit rather than `TextEditor`,
 /// which shows no attributed text before macOS 26.
-final class NoteTextView: NSTextView {
+final class NoteTextView: NSTextView, LinkHost {
     static let styledTextType = NSPasteboard.PasteboardType("com.alvarezjorge.Notely.styled-text")
 
     var textAppearance: TextAppearance?
@@ -877,6 +1210,8 @@ final class NoteTextView: NSTextView {
     var onStylesChange: ((Set<TextStyle>) -> Void)?
     private var renderedFamily: FontFamily?
     private var renderedSize: Int?
+    /// The web addresses shown as links, found again after every change.
+    private var links: [DetectedLink] = []
 
     // MARK: Styles
 
@@ -914,6 +1249,7 @@ final class NoteTextView: NSTextView {
         renderedSize = textAppearance?.size
         restyle(fullRange)
         typingAttributes = displayAttributes(for: [])
+        links = showLinks()
     }
 
     /// Restyles every character after a font or size change, keeping the
@@ -926,6 +1262,7 @@ final class NoteTextView: NSTextView {
         let typing = StyleTraits.traits(in: typingAttributes)
         restyle(fullRange)
         typingAttributes = displayAttributes(for: typing)
+        links = showLinks()
         needsDisplay = true
     }
 
@@ -1013,7 +1350,29 @@ final class NoteTextView: NSTextView {
             restyle(fullRange)
         }
         super.didChangeText()
+        // Typing, paste, cut, undo, and redo all end here.
+        links = showLinks()
         needsDisplay = true
+    }
+
+    // MARK: Links
+
+    func link(at point: NSPoint) -> (url: URL, rect: NSRect)? {
+        link(in: links, at: point)
+    }
+
+    /// Cmd+click on a link opens it and leaves the caret alone.
+    override func mouseDown(with event: NSEvent) {
+        if openLink(for: event) { return }
+        super.mouseDown(with: event)
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        if LinkHoverController.shared.isActive {
+            NSCursor.pointingHand.set()
+        } else {
+            super.cursorUpdate(with: event)
+        }
     }
 
     // MARK: Pasteboard
@@ -1234,9 +1593,75 @@ enum ListCommand {
 /// The `NSTextField` behind every editable list row. It answers "Check
 /// Item" (Cmd+Return) only while it is an item: AppKit enables a menu item
 /// only when some responder responds to its action.
-final class ListTextField: NSTextField {
+final class ListTextField: NSTextField, LinkHost {
     var isTitle = false
     var onToggle: (() -> Void)?
+
+    /// Cmd+click on a link opens it, also while another app is active,
+    /// and does not start editing.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        if openLink(for: event) { return }
+        super.mouseDown(with: event)
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        if LinkHoverController.shared.isActive {
+            NSCursor.pointingHand.set()
+        } else {
+            super.cursorUpdate(with: event)
+        }
+    }
+
+    /// The link under `point` while the row is not being edited, found by
+    /// laying out the shown text in a separate TextKit 1 stack the size of
+    /// the cell's text area. While the row is edited, the field editor,
+    /// which sits on top of the row, answers instead.
+    func link(at point: NSPoint) -> (url: URL, rect: NSRect)? {
+        guard currentEditor() == nil, let cell else { return nil }
+        let text = attributedStringValue
+        let links = LinkDetector.links(in: text.string)
+        guard !links.isEmpty else { return nil }
+
+        let textRect = cell.titleRect(forBounds: bounds)
+        let storage = NSTextStorage(attributedString: text)
+        let layoutManager = NSLayoutManager()
+        let container = NSTextContainer(size: NSSize(width: textRect.width, height: .greatestFiniteMagnitude))
+        // NSTextFieldCell lays out its text with this padding.
+        container.lineFragmentPadding = 2
+        layoutManager.addTextContainer(container)
+        storage.addLayoutManager(layoutManager)
+        layoutManager.ensureLayout(for: container)
+
+        // Container coordinates run down from the top of the text area.
+        func toContainer(_ point: NSPoint) -> NSPoint {
+            NSPoint(x: point.x - textRect.minX,
+                    y: isFlipped ? point.y - textRect.minY : textRect.maxY - point.y)
+        }
+        func toView(_ rect: NSRect) -> NSRect {
+            NSRect(x: rect.minX + textRect.minX,
+                   y: isFlipped ? rect.minY + textRect.minY : textRect.maxY - rect.maxY,
+                   width: rect.width, height: rect.height)
+        }
+
+        let containerPoint = toContainer(point)
+        var fraction: CGFloat = 0
+        let glyph = layoutManager.glyphIndex(for: containerPoint, in: container,
+                                             fractionOfDistanceThroughGlyph: &fraction)
+        let glyphRect = layoutManager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container)
+        guard glyphRect.contains(containerPoint) else { return nil }
+        let index = layoutManager.characterIndexForGlyph(at: glyph)
+        guard let link = links.first(where: { NSLocationInRange(index, $0.range) }) else { return nil }
+        // The rect of the link's piece on the line under the pointer.
+        var lineRange = NSRange()
+        _ = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: &lineRange)
+        let linkGlyphs = NSIntersectionRange(layoutManager.glyphRange(forCharacterRange: link.range,
+                                                                      actualCharacterRange: nil),
+                                             lineRange)
+        let rect = layoutManager.boundingRect(forGlyphRange: linkGlyphs, in: container)
+        return (link.url, toView(rect))
+    }
 
     override func responds(to aSelector: Selector!) -> Bool {
         if aSelector == #selector(toggleChecklistItem(_:)) { return onToggle != nil }
@@ -1245,6 +1670,52 @@ final class ListTextField: NSTextField {
 
     @objc func toggleChecklistItem(_ sender: Any?) {
         onToggle?()
+    }
+}
+
+/// The field editor of list rows: AppKit's shared editor for a window,
+/// replaced in list windows so rows show links and open them with
+/// Cmd+click while they are edited. TextKit 1, like AppKit's own field
+/// editor; `ListField` reads its `layoutManager` for caret lines.
+final class LinkFieldEditor: NSTextView, LinkHost {
+    private var links: [DetectedLink] = []
+
+    func refreshLinks() {
+        links = showLinks()
+    }
+
+    /// The row's text arrives here when editing starts, and when the list
+    /// changes it from outside.
+    override var string: String {
+        didSet { refreshLinks() }
+    }
+
+    override func didChangeText() {
+        super.didChangeText()
+        refreshLinks()
+    }
+
+    /// AppKit inserts the editor into a row each time editing starts.
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        DispatchQueue.main.async { [weak self] in self?.refreshLinks() }
+    }
+
+    func link(at point: NSPoint) -> (url: URL, rect: NSRect)? {
+        link(in: links, at: point)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if openLink(for: event) { return }
+        super.mouseDown(with: event)
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        if LinkHoverController.shared.isActive {
+            NSCursor.pointingHand.set()
+        } else {
+            super.cursorUpdate(with: event)
+        }
     }
 }
 
@@ -1265,7 +1736,8 @@ struct ListField: NSViewRepresentable {
     var onCommand: (ListCommand) -> Bool = { _ in false }
 
     /// All list text, placeholders included, is white in dark appearance
-    /// and black in light appearance; checked items are struck through.
+    /// and black in light appearance, except web addresses, which show as
+    /// links; checked items are struck through, links included.
     static func styled(_ text: String, font: NSFont, done: Bool) -> NSAttributedString {
         var attributes: [NSAttributedString.Key: Any] = [
             .font: font,
@@ -1274,7 +1746,11 @@ struct ListField: NSViewRepresentable {
         if done {
             attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
         }
-        return NSAttributedString(string: text, attributes: attributes)
+        let result = NSMutableAttributedString(string: text, attributes: attributes)
+        for link in LinkDetector.links(in: text) {
+            result.addAttributes(linkDisplayAttributes, range: link.range)
+        }
+        return result
     }
 
     static func placeholderString(_ placeholder: String, font: NSFont) -> NSAttributedString {
@@ -1961,9 +2437,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let menuDelegate = MenuWindowDelegate()
     /// One scroller-style observation per note window, keyed by window.
     var scrollerObservations: [ObjectIdentifier: NSKeyValueObservation] = [:]
+    /// One list-row field editor per list window, keyed by window.
+    var fieldEditors: [ObjectIdentifier: LinkFieldEditor] = [:]
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = makeMainMenu()
+        LinkHoverController.shared.start()
 
         // Notes open after the menu, so they stack in front of it.
         openMenuWindow()
@@ -2156,6 +2635,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // background-drag so it doesn't fight the text editor's own
         // mouse handling elsewhere in the window.
         window.isMovableByWindowBackground = false
+        // The link pointer and preview follow the pointer over text.
+        window.acceptsMouseMovedEvents = true
         window.minSize = minimumNoteSize
         // `contentRect` may be adjusted for the title bar; set the frame
         // itself so the saved size is the frame size.
@@ -2256,7 +2737,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let window = windows.removeValue(forKey: id) else { return nil }
         window.delegate = nil
         scrollerObservations.removeValue(forKey: ObjectIdentifier(window))
+        fieldEditors.removeValue(forKey: ObjectIdentifier(window))
         return window
+    }
+
+    /// List rows edit in a `LinkFieldEditor`, one per window, so they show
+    /// and open links while edited. Every other client gets AppKit's own.
+    func windowWillReturnFieldEditor(_ sender: NSWindow, to client: Any?) -> Any? {
+        guard client is ListTextField else { return nil }
+        let key = ObjectIdentifier(sender)
+        if let editor = fieldEditors[key] { return editor }
+        let editor = LinkFieldEditor(usingTextLayoutManager: false)
+        editor.isFieldEditor = true
+        // As AppKit's own field editor: plain text, with undo.
+        editor.isRichText = false
+        editor.importsGraphics = false
+        editor.allowsUndo = true
+        fieldEditors[key] = editor
+        return editor
     }
 
     /// Closes a note's window and keeps the note, listed in the menu.
