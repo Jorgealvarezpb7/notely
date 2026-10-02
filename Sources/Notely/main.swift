@@ -9,6 +9,29 @@ struct ListItem: Codable, Identifiable, Equatable {
     var done: Bool
 }
 
+/// One styled range of a note's text. `location` and `length` count
+/// UTF-16 code units, as `NSString` and `NSRange` do. A trait that is
+/// `nil` is off.
+struct StyleRun: Codable, Equatable {
+    var location: Int
+    var length: Int
+    var bold: Bool?
+    var italic: Bool?
+    var underline: Bool?
+
+    /// The run trimmed to a text of `textLength` UTF-16 code units, or
+    /// `nil` when nothing of it is left inside the text.
+    func clamped(toLength textLength: Int) -> StyleRun? {
+        let start = max(location, 0)
+        let end = min(location + length, textLength)
+        guard end > start else { return nil }
+        var run = self
+        run.location = start
+        run.length = end - start
+        return run
+    }
+}
+
 /// One note: its text and, once the window has been moved or resized,
 /// its saved window position in `NSStringFromPoint` form and its saved
 /// window size in `NSStringFromSize` form. `isOpen` is `false` once the
@@ -18,6 +41,9 @@ struct ListItem: Codable, Identifiable, Equatable {
 /// A list is a note whose `kind` is "list", with a `title` and `items`.
 /// `kind` is a string, not an enum, so a kind added by a later version
 /// still decodes (as a note) instead of failing the whole saved list.
+///
+/// `styles` holds a note's bold, italic, and underlined ranges. `text`
+/// stays plain, so a build without styles still shows the note's text.
 struct Note: Codable, Identifiable {
     let id: UUID
     var text: String
@@ -27,6 +53,7 @@ struct Note: Codable, Identifiable {
     var kind: String?
     var title: String?
     var items: [ListItem]?
+    var styles: [StyleRun]?
 
     static let listKind = "list"
 
@@ -57,7 +84,14 @@ final class NoteStore: ObservableObject {
             // An empty list (every note was deleted) stays empty, so the
             // menu shows only "+ New". Undecodable data falls back to one
             // empty note.
-            if let decoded = try? JSONDecoder().decode([Note].self, from: data) {
+            if var decoded = try? JSONDecoder().decode([Note].self, from: data) {
+                // Runs outside a note's text, from damaged data, are
+                // trimmed or dropped rather than failing the decode.
+                for index in decoded.indices {
+                    guard let styles = decoded[index].styles else { continue }
+                    let length = decoded[index].text.utf16.count
+                    decoded[index].styles = styles.compactMap { $0.clamped(toLength: length) }
+                }
                 notes = decoded
             } else {
                 notes = [Note(id: UUID(), text: "", origin: nil, size: nil)]
@@ -79,13 +113,12 @@ final class NoteStore: ObservableObject {
         notes.first(where: { $0.id == id })
     }
 
-    func text(for id: UUID) -> String {
-        notes.first(where: { $0.id == id })?.text ?? ""
-    }
-
-    func setText(_ text: String, for id: UUID) {
+    /// Saves a note's text and its style runs together. Empty runs are
+    /// saved as no styles.
+    func setText(_ text: String, styles: [StyleRun], for id: UUID) {
         guard let index = notes.firstIndex(where: { $0.id == id }) else { return }
         notes[index].text = text
+        notes[index].styles = styles.isEmpty ? nil : styles
         save()
     }
 
@@ -264,6 +297,144 @@ final class TextAppearance: ObservableObject {
         }
         return .systemFont(ofSize: size, weight: bold ? .bold : .regular)
     }
+
+    /// Display attributes for note text with these traits: the chosen
+    /// font, bold when asked, and for italic the font's italic face, or a
+    /// slant when the font has none (American Typewriter).
+    func noteAttributes(bold: Bool, italic: Bool) -> [NSAttributedString.Key: Any] {
+        var font = nsFont(bold: bold)
+        var obliqueness: CGFloat = 0
+        if italic {
+            let descriptor = font.fontDescriptor.withSymbolicTraits(font.fontDescriptor.symbolicTraits.union(.italic))
+            if let italicFont = NSFont(descriptor: descriptor, size: font.pointSize),
+               italicFont.familyName == font.familyName,
+               italicFont.fontDescriptor.symbolicTraits.contains(.italic) {
+                font = italicFont
+            } else {
+                obliqueness = 0.2
+            }
+        }
+        return [.font: font, .obliqueness: obliqueness, .foregroundColor: NSColor.textColor]
+    }
+}
+
+/// The styles a note's text can carry, in bottom bar order.
+enum TextStyle: CaseIterable {
+    case bold, italic, underline
+
+    var symbolName: String {
+        switch self {
+        case .bold: return "bold"
+        case .italic: return "italic"
+        case .underline: return "underline"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .bold: return "Bold"
+        case .italic: return "Italic"
+        case .underline: return "Underline"
+        }
+    }
+}
+
+extension NSAttributedString.Key {
+    /// Bold and italic are kept as traits, apart from the font, so a
+    /// change of the font setting keeps them. Underline uses the standard
+    /// `underlineStyle`.
+    static let notelyBold = NSAttributedString.Key("NotelyBold")
+    static let notelyItalic = NSAttributedString.Key("NotelyItalic")
+}
+
+extension StyleRun {
+    init(location: Int, length: Int, traits: Set<TextStyle>) {
+        self.init(location: location, length: length,
+                  bold: traits.contains(.bold) ? true : nil,
+                  italic: traits.contains(.italic) ? true : nil,
+                  underline: traits.contains(.underline) ? true : nil)
+    }
+
+    var traits: Set<TextStyle> {
+        var traits = Set<TextStyle>()
+        if bold == true { traits.insert(.bold) }
+        if italic == true { traits.insert(.italic) }
+        if underline == true { traits.insert(.underline) }
+        return traits
+    }
+}
+
+/// Text and style runs, as `Note` saves them; also the private pasteboard
+/// type for copying styled text between notes.
+struct StyledText: Codable {
+    var text: String
+    var styles: [StyleRun]
+}
+
+/// Converts between attributed text and style runs.
+enum StyleTraits {
+    static func traits(in attributes: [NSAttributedString.Key: Any]) -> Set<TextStyle> {
+        var traits = Set<TextStyle>()
+        if attributes[.notelyBold] as? Bool == true { traits.insert(.bold) }
+        if attributes[.notelyItalic] as? Bool == true { traits.insert(.italic) }
+        if let underline = attributes[.underlineStyle] as? Int, underline != 0 { traits.insert(.underline) }
+        return traits
+    }
+
+    /// The trait attributes alone, without display attributes.
+    static func attributes(for traits: Set<TextStyle>) -> [NSAttributedString.Key: Any] {
+        var attributes: [NSAttributedString.Key: Any] = [:]
+        if traits.contains(.bold) { attributes[.notelyBold] = true }
+        if traits.contains(.italic) { attributes[.notelyItalic] = true }
+        if traits.contains(.underline) { attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue }
+        return attributes
+    }
+
+    /// Runs of `text` with at least one trait, adjacent equal runs merged.
+    static func runs(of text: NSAttributedString) -> [StyleRun] {
+        var runs: [StyleRun] = []
+        text.enumerateAttributes(in: NSRange(location: 0, length: text.length)) { attributes, range, _ in
+            let traits = Self.traits(in: attributes)
+            guard !traits.isEmpty else { return }
+            if let last = runs.last, last.location + last.length == range.location, last.traits == traits {
+                runs[runs.count - 1].length += range.length
+            } else {
+                runs.append(StyleRun(location: range.location, length: range.length, traits: traits))
+            }
+        }
+        return runs
+    }
+
+    /// `text` with the trait attributes of `runs`; runs are clamped to it.
+    static func attributed(_ text: String, runs: [StyleRun]) -> NSMutableAttributedString {
+        let result = NSMutableAttributedString(string: text)
+        for run in runs {
+            guard let run = run.clamped(toLength: result.length) else { continue }
+            result.addAttributes(attributes(for: run.traits),
+                                 range: NSRange(location: run.location, length: run.length))
+        }
+        return result
+    }
+
+    /// Rich text from another source reduced to bold, italic, and
+    /// underline. Bold and italic come from the font's traits; a slant
+    /// counts as italic.
+    static func sanitized(_ rich: NSAttributedString) -> NSMutableAttributedString {
+        let result = NSMutableAttributedString(string: rich.string)
+        rich.enumerateAttributes(in: NSRange(location: 0, length: rich.length)) { attributes, range, _ in
+            var traits = Self.traits(in: attributes)
+            if let font = attributes[.font] as? NSFont {
+                let symbolic = font.fontDescriptor.symbolicTraits
+                if symbolic.contains(.bold) { traits.insert(.bold) }
+                if symbolic.contains(.italic) { traits.insert(.italic) }
+            }
+            if let slant = attributes[.obliqueness] as? NSNumber, slant.doubleValue > 0 {
+                traits.insert(.italic)
+            }
+            result.addAttributes(Self.attributes(for: traits), range: range)
+        }
+        return result
+    }
 }
 
 /// A note's window: a titled, resizable window whose title bar is
@@ -322,12 +493,21 @@ struct StripButton: NSViewRepresentable {
 
     let symbolName: String
     let accessibilityLabel: String
+    /// `nil` for a plain button. Set for an on/off button (the style
+    /// buttons): no background in any state; the symbol shows in the
+    /// label color (white in dark appearance) while on and gray while
+    /// off. The button never takes keyboard focus, so the note keeps its
+    /// selection.
+    var isOn: Bool? = nil
     let action: (NSButton) -> Void
 
     func makeNSView(context: Context) -> NSButton {
         let button = FirstMouseButton()
         button.isBordered = false
         button.bezelStyle = .regularSquare
+        if isOn != nil {
+            button.refusesFirstResponder = true
+        }
         button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: accessibilityLabel)
         button.image?.isTemplate = true
         button.setAccessibilityLabel(accessibilityLabel)
@@ -338,6 +518,9 @@ struct StripButton: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSButton, context: Context) {
         context.coordinator.action = action
+        if let isOn {
+            nsView.contentTintColor = isOn ? .labelColor : .secondaryLabelColor
+        }
     }
 
     func makeCoordinator() -> Coordinator {
@@ -398,31 +581,39 @@ let bottomBarHeight = (barHeight * 0.8).rounded()
 
 /// The bottom bar of note and list windows: drags the window and ends
 /// editing, with the font button and the text size button at the
-/// trailing edge.
+/// trailing edge. Note windows pass their editor state and also get the
+/// style buttons at the leading edge.
 struct BottomBar: View {
     @ObservedObject var appearance: TextAppearance
+    var editorState: NoteEditorState? = nil
     @StateObject private var controls = AppearanceControls()
 
     var body: some View {
         // The buttons sit on top of the click target, as in the top bar.
         ZStack {
             EndEditingView(drags: true)
-            HStack(spacing: 16) {
-                Spacer(minLength: 0)
-                StripButton(symbolName: "textformat", accessibilityLabel: "Font") { button in
-                    controls.appearance = appearance
-                    controls.showFontMenu(from: button)
+            // Fits five buttons in the minimum note width.
+            HStack(spacing: 0) {
+                if let editorState {
+                    StyleButtons(state: editorState)
                 }
-                .frame(width: StripButton.referenceSize.width,
-                       height: StripButton.referenceSize.height)
-                StripButton(symbolName: "textformat.size", accessibilityLabel: "Text Size") { button in
-                    controls.appearance = appearance
-                    controls.toggleSizePopover(from: button)
+                Spacer(minLength: 16)
+                HStack(spacing: 16) {
+                    StripButton(symbolName: "textformat", accessibilityLabel: "Font") { button in
+                        controls.appearance = appearance
+                        controls.showFontMenu(from: button)
+                    }
+                    .frame(width: StripButton.referenceSize.width,
+                           height: StripButton.referenceSize.height)
+                    StripButton(symbolName: "textformat.size", accessibilityLabel: "Text Size") { button in
+                        controls.appearance = appearance
+                        controls.toggleSizePopover(from: button)
+                    }
+                    .frame(width: StripButton.referenceSize.width,
+                           height: StripButton.referenceSize.height)
                 }
-                .frame(width: StripButton.referenceSize.width,
-                       height: StripButton.referenceSize.height)
             }
-            .padding(.trailing, 12)
+            .padding(.horizontal, 12)
         }
         .frame(minWidth: 0, maxWidth: .infinity)
         .frame(height: bottomBarHeight)
@@ -539,31 +730,11 @@ struct NoteView: View {
     let id: UUID
     var onClose: () -> Void
     var onDelete: () -> Void
-
-    private var text: Binding<String> {
-        Binding(
-            get: { store.text(for: id) },
-            set: { store.setText($0, for: id) }
-        )
-    }
+    @StateObject private var editorState = NoteEditorState()
 
     var body: some View {
-        // One font for the text and its placeholder keeps them in step.
-        let font = appearance.swiftUIFont(size: CGFloat(appearance.size))
-        ZStack(alignment: .topLeading) {
-            TextEditor(text: text)
-                .scrollContentBackground(.hidden)
-                .font(font)
-
-            if text.wrappedValue.isEmpty {
-                Text("Type a note…")
-                    .font(font)
-                    .foregroundStyle(Color(nsColor: .textColor))
-                    .padding(.top, 8)
-                    .padding(.leading, 5)
-                    .allowsHitTesting(false)
-            }
-        }
+        NoteEditor(store: store, appearance: appearance, family: appearance.family,
+                   size: appearance.size, id: id, state: editorState)
         .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
         .padding(.horizontal, 12)
         .padding(.top, barHeight + barGap)
@@ -574,13 +745,386 @@ struct NoteView: View {
             NoteStrip(onClose: onClose, onDelete: onDelete)
         }
         .overlay(alignment: .bottom) {
-            BottomBar(appearance: appearance)
+            BottomBar(appearance: appearance, editorState: editorState)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.ultraThinMaterial)
         // Fill the transparent title bar too, so the top bar sits at the
         // top edge of the window.
         .ignoresSafeArea()
+    }
+}
+
+/// A note window's editor as the bottom bar sees it: the styles that
+/// apply at the caret or to the whole selection (none while the note
+/// does not have keyboard focus), and the text view to toggle them in.
+final class NoteEditorState: ObservableObject {
+    @Published var active: Set<TextStyle> = []
+    weak var textView: NoteTextView?
+}
+
+/// The Bold, Italic, and Underline buttons of a note's bottom bar.
+struct StyleButtons: View {
+    @ObservedObject var state: NoteEditorState
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ForEach(TextStyle.allCases, id: \.self) { style in
+                StripButton(symbolName: style.symbolName, accessibilityLabel: style.title,
+                            isOn: state.active.contains(style)) { _ in
+                    state.textView?.toggle(style)
+                }
+                .frame(width: StripButton.referenceSize.width,
+                       height: StripButton.referenceSize.height)
+            }
+        }
+    }
+}
+
+/// A note's text view. Text carries bold and italic as trait attributes
+/// and underline as `underlineStyle`; `restyle` derives the font, slant,
+/// and color from the traits and the text appearance setting, so a font
+/// or size change keeps every style. AppKit rather than `TextEditor`,
+/// which shows no attributed text before macOS 26.
+final class NoteTextView: NSTextView {
+    static let styledTextType = NSPasteboard.PasteboardType("com.alvarezjorge.Notely.styled-text")
+
+    var textAppearance: TextAppearance?
+    var placeholder = "Type a note…"
+    /// Called whenever the active styles may have changed.
+    var onStylesChange: ((Set<TextStyle>) -> Void)?
+    private var renderedFamily: FontFamily?
+    private var renderedSize: Int?
+
+    // MARK: Styles
+
+    func displayAttributes(for traits: Set<TextStyle>) -> [NSAttributedString.Key: Any] {
+        var attributes = textAppearance?.noteAttributes(bold: traits.contains(.bold),
+                                                        italic: traits.contains(.italic))
+            ?? [.font: NSFont.systemFont(ofSize: 15), .foregroundColor: NSColor.textColor]
+        attributes.merge(StyleTraits.attributes(for: traits)) { _, new in new }
+        return attributes
+    }
+
+    /// Sets the display attributes of `range` from its traits, dropping
+    /// every other attribute. Registers no undo.
+    func restyle(_ range: NSRange) {
+        guard let storage = textStorage, range.length > 0 else { return }
+        var pieces: [(NSRange, Set<TextStyle>)] = []
+        storage.enumerateAttributes(in: range) { attributes, piece, _ in
+            pieces.append((piece, StyleTraits.traits(in: attributes)))
+        }
+        storage.beginEditing()
+        for (piece, traits) in pieces {
+            storage.setAttributes(displayAttributes(for: traits), range: piece)
+        }
+        storage.endEditing()
+    }
+
+    private var fullRange: NSRange {
+        NSRange(location: 0, length: textStorage?.length ?? 0)
+    }
+
+    /// Shows `text` with the styles of `runs`, with no undo history.
+    func load(text: String, runs: [StyleRun]) {
+        textStorage?.setAttributedString(StyleTraits.attributed(text, runs: runs))
+        renderedFamily = textAppearance?.family
+        renderedSize = textAppearance?.size
+        restyle(fullRange)
+        typingAttributes = displayAttributes(for: [])
+    }
+
+    /// Restyles every character after a font or size change, keeping the
+    /// styles for new typing.
+    func applyAppearance() {
+        guard let appearance = textAppearance,
+              appearance.family != renderedFamily || appearance.size != renderedSize else { return }
+        renderedFamily = appearance.family
+        renderedSize = appearance.size
+        let typing = StyleTraits.traits(in: typingAttributes)
+        restyle(fullRange)
+        typingAttributes = displayAttributes(for: typing)
+        needsDisplay = true
+    }
+
+    var runs: [StyleRun] {
+        textStorage.map { StyleTraits.runs(of: $0) } ?? []
+    }
+
+    /// The styles of the whole selection, or with no selection those for
+    /// new typing; none while the text view does not have keyboard focus.
+    var activeStyles: Set<TextStyle> {
+        guard window?.firstResponder === self, let storage = textStorage else { return [] }
+        let ranges = selectedRanges.map(\.rangeValue).filter { $0.length > 0 }
+        if ranges.isEmpty {
+            return StyleTraits.traits(in: typingAttributes)
+        }
+        var common = Set(TextStyle.allCases)
+        for range in ranges {
+            storage.enumerateAttributes(in: range) { attributes, _, stop in
+                common.formIntersection(StyleTraits.traits(in: attributes))
+                if common.isEmpty { stop.pointee = true }
+            }
+        }
+        return common
+    }
+
+    func notifyStyles() {
+        onStylesChange?(activeStyles)
+    }
+
+    /// Toggles `style` on the selection, or with no selection for new
+    /// typing. A selection that has the style everywhere loses it;
+    /// otherwise all of it gets it.
+    func toggle(_ style: TextStyle) {
+        if window?.firstResponder !== self {
+            window?.makeFirstResponder(self)
+        }
+        let ranges = selectedRanges.map(\.rangeValue).filter { $0.length > 0 }
+        guard let storage = textStorage, !ranges.isEmpty else {
+            var traits = StyleTraits.traits(in: typingAttributes)
+            traits.formSymmetricDifference([style])
+            typingAttributes = displayAttributes(for: traits)
+            notifyStyles()
+            return
+        }
+        let remove = activeStyles.contains(style)
+        guard shouldChangeText(inRanges: ranges.map { NSValue(range: $0) }, replacementStrings: nil) else { return }
+        storage.beginEditing()
+        for range in ranges {
+            var pieces: [(NSRange, Set<TextStyle>)] = []
+            storage.enumerateAttributes(in: range) { attributes, piece, _ in
+                pieces.append((piece, StyleTraits.traits(in: attributes)))
+            }
+            for (piece, traits) in pieces {
+                var traits = traits
+                if remove { traits.remove(style) } else { traits.insert(style) }
+                storage.setAttributes(displayAttributes(for: traits), range: piece)
+            }
+        }
+        storage.endEditing()
+        didChangeText()
+        notifyStyles()
+    }
+
+    @objc func toggleNoteBold(_ sender: Any?) { toggle(.bold) }
+    @objc func toggleNoteItalic(_ sender: Any?) { toggle(.italic) }
+    @objc func toggleNoteUnderline(_ sender: Any?) { toggle(.underline) }
+
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        let styles: [Selector: TextStyle] = [
+            #selector(toggleNoteBold(_:)): .bold,
+            #selector(toggleNoteItalic(_:)): .italic,
+            #selector(toggleNoteUnderline(_:)): .underline,
+        ]
+        if let action = item.action, let style = styles[action] {
+            (item as? NSMenuItem)?.state = activeStyles.contains(style) ? .on : .off
+            return true
+        }
+        return super.validateUserInterfaceItem(item)
+    }
+
+    override func didChangeText() {
+        // Undo and redo put back attributes rendered for the font
+        // setting at that time; render them for the current one.
+        if undoManager?.isUndoing == true || undoManager?.isRedoing == true {
+            restyle(fullRange)
+        }
+        super.didChangeText()
+        needsDisplay = true
+    }
+
+    // MARK: Pasteboard
+
+    override var writablePasteboardTypes: [NSPasteboard.PasteboardType] {
+        super.writablePasteboardTypes + [Self.styledTextType]
+    }
+
+    /// Adds the selection's text and runs as a private type next to RTF
+    /// and plain text, so a slanted italic copies exactly between notes.
+    override func writeSelection(to pboard: NSPasteboard, type: NSPasteboard.PasteboardType) -> Bool {
+        guard type == Self.styledTextType else { return super.writeSelection(to: pboard, type: type) }
+        guard let storage = textStorage else { return false }
+        let range = selectedRange()
+        guard range.length > 0 else { return false }
+        let selection = storage.attributedSubstring(from: range)
+        let payload = StyledText(text: selection.string, styles: StyleTraits.runs(of: selection))
+        guard let data = try? JSONEncoder().encode(payload) else { return false }
+        return pboard.setData(data, forType: type)
+    }
+
+    override var readablePasteboardTypes: [NSPasteboard.PasteboardType] {
+        [Self.styledTextType] + super.readablePasteboardTypes
+    }
+
+    /// Paste and drop keep only bold, italic, and underline; the text
+    /// takes the note's font, size, and color. Plain text takes the
+    /// styles for new typing.
+    override func readSelection(from pboard: NSPasteboard, type: NSPasteboard.PasteboardType) -> Bool {
+        let incoming: NSMutableAttributedString
+        if let data = pboard.data(forType: Self.styledTextType),
+           let payload = try? JSONDecoder().decode(StyledText.self, from: data) {
+            incoming = StyleTraits.attributed(payload.text, runs: payload.styles)
+        } else if let rich = Self.richText(from: pboard) {
+            incoming = StyleTraits.sanitized(rich)
+        } else if let plain = pboard.string(forType: .string) {
+            let typing = StyleTraits.traits(in: typingAttributes)
+            incoming = NSMutableAttributedString(string: plain, attributes: StyleTraits.attributes(for: typing))
+        } else {
+            return false
+        }
+        insertStyled(incoming)
+        return true
+    }
+
+    private static func richText(from pboard: NSPasteboard) -> NSAttributedString? {
+        if let data = pboard.data(forType: .rtfd), let text = NSAttributedString(rtfd: data, documentAttributes: nil) {
+            return text
+        }
+        if let data = pboard.data(forType: .rtf), let text = NSAttributedString(rtf: data, documentAttributes: nil) {
+            return text
+        }
+        if let data = pboard.data(forType: .html), let text = NSAttributedString(html: data, documentAttributes: nil) {
+            return text
+        }
+        return nil
+    }
+
+    /// Replaces the selection with `text` as one undoable change.
+    private func insertStyled(_ text: NSMutableAttributedString) {
+        let range = rangeForUserTextChange
+        guard range.location != NSNotFound, let storage = textStorage,
+              shouldChangeText(in: range, replacementString: text.string) else { return }
+        storage.replaceCharacters(in: range, with: text)
+        restyle(NSRange(location: range.location, length: text.length))
+        didChangeText()
+        setSelectedRange(NSRange(location: range.location + text.length, length: 0))
+    }
+
+    // MARK: Behavior kept from the note's former text editor
+
+    /// Esc ends editing and keeps the text.
+    override func cancelOperation(_ sender: Any?) {
+        window?.makeFirstResponder(nil)
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        DispatchQueue.main.async { [weak self] in self?.notifyStyles() }
+        return accepted
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        DispatchQueue.main.async { [weak self] in self?.notifyStyles() }
+        return resigned
+    }
+
+    /// The placeholder starts where the first typed character appears,
+    /// at every font and size, since both use the text container's origin.
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard string.isEmpty else { return }
+        let padding = textContainer?.lineFragmentPadding ?? 0
+        let origin = NSPoint(x: textContainerOrigin.x + padding, y: textContainerOrigin.y)
+        NSAttributedString(string: placeholder, attributes: displayAttributes(for: [])).draw(at: origin)
+    }
+}
+
+/// Keeps a note's text view at least as tall as the visible area, so a
+/// click below the last line still puts the caret in the note.
+final class NoteScrollView: NSScrollView {
+    override func tile() {
+        super.tile()
+        guard let textView = documentView as? NSTextView,
+              textView.minSize.height != contentSize.height else { return }
+        textView.minSize = NSSize(width: 0, height: contentSize.height)
+        textView.sizeToFit()
+    }
+}
+
+/// Hosts a note's `NoteTextView`. Loads the note's text and styles once;
+/// after that the text view owns them and saves every change.
+struct NoteEditor: NSViewRepresentable {
+    let store: NoteStore
+    let appearance: TextAppearance
+    /// Passed by value so SwiftUI updates the view when either changes.
+    let family: FontFamily
+    let size: Int
+    let id: UUID
+    let state: NoteEditorState
+
+    func makeNSView(context: Context) -> NoteScrollView {
+        let scrollView = NoteScrollView()
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.scrollerStyle = .overlay
+
+        let contentSize = scrollView.contentSize
+        let textView = NoteTextView(frame: NSRect(origin: .zero, size: contentSize))
+        textView.minSize = NSSize(width: 0, height: contentSize.height)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: contentSize.width,
+                                                       height: .greatestFiniteMagnitude)
+        textView.textContainerInset = .zero
+        textView.isRichText = true
+        textView.importsGraphics = false
+        textView.usesFontPanel = false
+        textView.usesRuler = false
+        textView.allowsUndo = true
+        textView.drawsBackground = false
+        textView.allowsDocumentBackgroundColorChange = false
+        textView.textColor = .textColor
+        textView.insertionPointColor = .textColor
+        textView.textAppearance = appearance
+        let note = store.note(id)
+        textView.load(text: note?.text ?? "", runs: note?.styles ?? [])
+        textView.delegate = context.coordinator
+        let state = self.state
+        textView.onStylesChange = { styles in
+            if state.active != styles { state.active = styles }
+        }
+        state.textView = textView
+
+        scrollView.documentView = textView
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NoteScrollView, context: Context) {
+        context.coordinator.parent = self
+        guard let textView = scrollView.documentView as? NoteTextView else { return }
+        textView.textAppearance = appearance
+        textView.applyAppearance()
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: NoteEditor
+
+        init(_ parent: NoteEditor) { self.parent = parent }
+
+        /// Saves text and styles together on every change, style-only
+        /// changes included.
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NoteTextView else { return }
+            parent.store.setText(textView.string, styles: textView.runs, for: parent.id)
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            (notification.object as? NoteTextView)?.notifyStyles()
+        }
     }
 }
 
@@ -1161,14 +1705,24 @@ func makeMainMenu() -> NSMenu {
                      action: #selector(ListTextField.toggleChecklistItem(_:)),
                      keyEquivalent: "\r")
 
+    // Only a note's text view responds to these, so they are disabled
+    // unless a note has keyboard focus, and do nothing in lists.
+    let formatMenu = NSMenu(title: "Format")
+    formatMenu.addItem(withTitle: "Bold", action: #selector(NoteTextView.toggleNoteBold(_:)), keyEquivalent: "b")
+    formatMenu.addItem(withTitle: "Italic", action: #selector(NoteTextView.toggleNoteItalic(_:)), keyEquivalent: "i")
+    formatMenu.addItem(withTitle: "Underline", action: #selector(NoteTextView.toggleNoteUnderline(_:)), keyEquivalent: "u")
+
     let appItem = NSMenuItem()
     appItem.submenu = appMenu
     let editItem = NSMenuItem()
     editItem.submenu = editMenu
+    let formatItem = NSMenuItem()
+    formatItem.submenu = formatMenu
 
     let mainMenu = NSMenu()
     mainMenu.addItem(appItem)
     mainMenu.addItem(editItem)
+    mainMenu.addItem(formatItem)
     return mainMenu
 }
 
@@ -1180,10 +1734,10 @@ func clamp(_ frame: NSRect, into screen: NSRect) -> NSPoint {
            y: min(max(frame.minY, screen.minY), screen.maxY - frame.height))
 }
 
-/// Smallest size a note window can have: half the width of a new note,
-/// which still fits the top bar's buttons, and room for the bottom bar
-/// and one line of text.
-let minimumNoteSize = NSSize(width: 110, height: 120)
+/// Smallest size a note or list window can have: wide enough for the
+/// five bottom bar buttons of a note, and room for the bottom bar and one
+/// line of text.
+let minimumNoteSize = NSSize(width: 160, height: 120)
 
 /// Size of a note with no saved size.
 let defaultNoteSize = NSSize(width: 220, height: 150)
