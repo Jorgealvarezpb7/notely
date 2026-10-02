@@ -7,7 +7,7 @@ Provides note windows that the user can type into, and that keep their text and 
 ## Requirements
 
 ### Requirement: Editable note text
-Every note panel SHALL show one note area in place of the previous greeting and clock. The user MUST be able to type, delete, select, copy, and paste text in each note area. Note text MAY carry bold, italic, and underline styles as defined by the text-styles capability; it MUST NOT carry any other formatting.
+Every note panel SHALL show one note area in place of the previous greeting and clock. The user MUST be able to type, delete, select, copy, and paste text in each note area. Note text MAY carry bold, italic, and underline styles as defined by the text-styles capability; it MUST NOT carry any other formatting. Web addresses in note text show as links as defined by the links capability; that display is not formatting the note carries.
 
 #### Scenario: Type into the note
 - **WHEN** the user clicks inside a note area and types characters
@@ -26,7 +26,7 @@ Every note panel SHALL show one note area in place of the previous greeting and 
 - **THEN** no panel shows greeting text or a clock
 
 #### Scenario: No other formatting
-- **WHEN** the user pastes text with colors and links into a note area
+- **WHEN** the user pastes text with colors and links whose visible text is not a web address into a note area
 - **THEN** the note shows the text with no colors and no links
 
 ### Requirement: End editing
@@ -72,7 +72,7 @@ The text of every note SHALL persist across app quit and relaunch. Changes MUST 
 - **THEN** the next launch shows that note's full text including the last keystroke
 
 ### Requirement: Panel stays movable
-The user SHALL be able to move the panel by dragging a visible area that is not the text. Every note window MUST show a drag area across its top edge and a bottom bar across its bottom edge. Both MUST span the full width of the window. The bottom bar MUST be 20% lower than the drag area. Both MUST show a shaded fill that sets them apart from the note area: darker than the note area in light appearance and lighter in dark appearance. The drag area MUST NOT show a grip mark. The bottom bar of a note window MUST show only the Bold, Italic, and Underline buttons at its leading edge, and the font button and the text size button at its trailing edge. Dragging the drag area, or the bottom bar outside its buttons, MUST move the panel. The note area MUST end above the bottom bar, so no note text shows under it. Dragging inside the text MUST select text and MUST NOT move the panel.
+The user SHALL be able to move the panel by dragging a visible area that is not the text. Every note window MUST show a drag area across its top edge and a bottom bar across its bottom edge. Both MUST span the full width of the window. The bottom bar MUST be 20% lower than the drag area. Both MUST show a shaded fill that sets them apart from the note area: darker than the note area in light appearance and lighter in dark appearance. The drag area MUST NOT show a grip mark. The drag area MUST show only its shaded fill, the "−" and trash buttons, and the Notely logo. The bottom bar of a note window MUST show only the Bold, Italic, and Underline buttons at its leading edge, and the font button and the text size button at its trailing edge. Dragging the drag area, or the bottom bar outside its buttons, MUST move the panel. The note area MUST end above the bottom bar, so no note text shows under it. Dragging inside the text MUST select text and MUST NOT move the panel.
 
 #### Scenario: Drag the drag area
 - **WHEN** the user drags the panel's drag area
@@ -100,7 +100,7 @@ The user SHALL be able to move the panel by dragging a visible area that is not 
 
 #### Scenario: No grip mark
 - **WHEN** a note window is open
-- **THEN** its drag area shows only the "−" and trash buttons and its shaded fill
+- **THEN** its drag area shows only its shaded fill, the "−" and trash buttons, and the Notely logo
 
 #### Scenario: Long note above the bottom bar
 - **WHEN** a note's text is longer than its visible note area
@@ -208,3 +208,43 @@ The scroll bar of every note area SHALL be hidden while the user is not scrollin
 #### Scenario: Scroll with the caret
 - **WHEN** a note's text is longer than its visible note area and the user moves the caret below the visible area with the arrow keys
 - **THEN** the note area scrolls to keep the caret visible
+
+### Requirement: Logo in the drag area
+The drag area of every note window and every list window SHALL show the Notely logo: an "N" between two pairs of quote marks, as drawn in `Packaging/notely-logo.svg`. The logo MUST be centered horizontally in the window and vertically in the drag area, and MUST keep the artwork's proportions. The logo MUST be shorter than the drag area, with space above and below it. The logo MUST show in a translucent black in light appearance and a translucent white in dark appearance, so it matches the drag area's shaded fill, and MUST show less strongly than the "−" and trash buttons. The logo MUST change color at once when the system appearance changes. The logo MUST NOT be a control: a click on it MUST end editing, and dragging from it MUST move the window, as on any other part of the drag area. When the window is too narrow for the logo to show at the center without touching the "−" button, the drag area MUST NOT show the logo. The menu window MUST NOT show the logo.
+
+#### Scenario: Logo in a note window
+- **WHEN** a note window is open at its default size
+- **THEN** its drag area shows the Notely logo at the horizontal center of the window
+
+#### Scenario: Logo in a list window
+- **WHEN** a list window is open at its default size
+- **THEN** its drag area shows the Notely logo at the horizontal center of the window
+
+#### Scenario: Logo in light appearance
+- **WHEN** the system appearance is light
+- **THEN** the logo shows in a translucent black, lighter than the "−" and trash buttons
+
+#### Scenario: Logo in dark appearance
+- **WHEN** the system appearance is dark
+- **THEN** the logo shows in a translucent white, dimmer than the "−" and trash buttons
+
+#### Scenario: Appearance changes
+- **WHEN** a note window is open and the user switches the system appearance from light to dark
+- **THEN** the logo changes from translucent black to translucent white without reopening the window
+
+#### Scenario: Drag from the logo
+- **WHEN** the user drags the window starting on the logo
+- **THEN** the window moves with the pointer
+
+#### Scenario: Click the logo while editing
+- **WHEN** the note area has keyboard focus and the user clicks the logo
+- **THEN** editing ends and the note text is kept
+
+#### Scenario: Narrow window
+- **WHEN** the user resizes a note window to its minimum width
+- **THEN** the drag area shows no logo
+- **AND** the "−" and trash buttons show and work as before
+
+#### Scenario: Menu window
+- **WHEN** the menu window is open
+- **THEN** it shows no Notely logo

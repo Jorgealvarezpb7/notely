@@ -28,7 +28,7 @@ Every list SHALL have its own window that behaves like a note window. Its drag a
 - **AND** the window shows no red, yellow, or green button
 
 ### Requirement: List title
-A list window SHALL show a title row above its items. The title MUST show in the bold form of the font of the text appearance setting, at the setting's size: American Typewriter Bold or the bold macOS system font, at 10 to 20 points, with American Typewriter Bold at 15 points when the user has not changed the setting. When the title is empty, the row MUST show the placeholder "Untitled list" in the same font and size. All list text, the title, items, and the "Untitled list" and "New item" placeholders included, MUST show white in dark appearance and black in light appearance, never gray. The user MUST be able to type, select, copy, and paste in the title.
+A list window SHALL show a title row above its items. The title MUST show in the bold form of the font of the text appearance setting, at the setting's size: American Typewriter Bold or the bold macOS system font, at 10 to 20 points, with American Typewriter Bold at 15 points when the user has not changed the setting. When the title is empty, the row MUST show the placeholder "Untitled list" in the same font and size. All list text, the title, items, and the "Untitled list" and "New item" placeholders included, MUST show white in dark appearance and black in light appearance, never gray, except web addresses, which show in the link color as defined by the links capability. The user MUST be able to type, select, copy, and paste in the title.
 
 #### Scenario: Name a list
 - **WHEN** the font setting is the default and the user types "Groceries" in a list's title row
@@ -42,8 +42,12 @@ A list window SHALL show a title row above its items. The title MUST show in the
 - **WHEN** a list's title is empty
 - **THEN** the title row shows the placeholder "Untitled list"
 
+#### Scenario: Address in a title
+- **WHEN** a list's title is "Trip: https://example.com/plan"
+- **THEN** "Trip:" shows in white or black and "https://example.com/plan" shows as a link
+
 ### Requirement: List items
-Below the title, a list window SHALL show one row per item. Each row MUST show a circle at its leading edge and the item's text in the font and at the size of the text appearance setting, with American Typewriter at 15 points when the user has not changed the setting. The "New item" placeholder MUST use the same font and size. Long item text MUST wrap onto more lines within the window's width, and rows MUST change height to fit the text when the size changes. An empty row with the placeholder "New item" MUST always follow the unchecked items, before the checked items. Typing in the "New item" row MUST create an item with the typed text, keep keyboard focus in that item, and show a new empty "New item" row below it. When an item loses keyboard focus while its text is empty, that item MUST be removed. When the items are taller than the window, the list MUST scroll vertically, and its scroll bar MUST show only while the user scrolls, as in note areas.
+Below the title, a list window SHALL show one row per item. Each row MUST show a circle at its leading edge and the item's text in the font and at the size of the text appearance setting, with American Typewriter at 15 points when the user has not changed the setting. The "New item" placeholder MUST use the same font and size. Long item text MUST wrap onto more lines within the window's width, and rows MUST change height to fit the text when the size changes. An empty row with the placeholder "New item" MUST always follow the unchecked items, before the checked items. Typing in the "New item" row MUST create an item with the typed text, keep keyboard focus in that item, and show a new empty "New item" row below it. When an item loses keyboard focus while its text is empty, that item MUST be removed. When the items are taller than the window, the list MUST scroll vertically, and its scroll bar MUST show only while the user scrolls, as in note areas. The title and the rows MUST show only between the drag area and the bottom bar: while the list scrolls, no list text, circle, or placeholder MUST show over or under either bar, and the drag area's and the bottom bar's buttons MUST stay visible and clickable.
 
 #### Scenario: Add the first item
 - **WHEN** a list has no items and the user types "milk" in the "New item" row
@@ -67,6 +71,20 @@ Below the title, a list window SHALL show one row per item. Each row MUST show a
 - **WHEN** a list's items are taller than its window and the user is not scrolling
 - **THEN** the list shows no scroll bar
 - **AND** scrolling the list shows the scroll bar until scrolling stops
+
+#### Scenario: Scroll a long list down
+- **WHEN** a list's items are taller than its window and the user scrolls to the end of the list
+- **THEN** the rows that scroll up past the top of the list area are hidden where the list area begins, below the drag area
+- **AND** the drag area shows only its fill, its logo, and the "−" and trash buttons
+
+#### Scenario: Scroll a long list back up
+- **WHEN** the user scrolls a long list back to the top
+- **THEN** the rows that scroll down past the bottom of the list area are hidden where the list area ends, above the bottom bar
+- **AND** the title shows below the drag area, as before scrolling
+
+#### Scenario: Buttons over a scrolled list
+- **WHEN** a long list is scrolled so rows sit right below the drag area, and the user clicks "−"
+- **THEN** the list window closes, as when the list is not scrolled
 
 ### Requirement: Check and uncheck items
 Clicking an item's circle SHALL check an unchecked item and uncheck a checked item, without moving keyboard focus into the item. An unchecked item MUST show an empty circle outline. A checked item MUST show a filled circle, white in dark appearance and dark gray in light appearance, and its text MUST show struck through, in the same white or black as unchecked text. Checked items MUST show after the "New item" row, with the most recently checked item first. Unchecking an item MUST move it to the end of the unchecked items. Items MUST animate to their new place. The "New item" row MUST NOT show a circle that can be checked.
