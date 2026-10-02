@@ -7,7 +7,7 @@ Provides note windows that the user can type into, and that keep their text and 
 ## Requirements
 
 ### Requirement: Editable note text
-Every note panel SHALL show one plain-text note area in place of the previous greeting and clock. The user MUST be able to type, delete, select, copy, and paste text in each note area.
+Every note panel SHALL show one note area in place of the previous greeting and clock. The user MUST be able to type, delete, select, copy, and paste text in each note area. Note text MAY carry bold, italic, and underline styles as defined by the text-styles capability; it MUST NOT carry any other formatting.
 
 #### Scenario: Type into the note
 - **WHEN** the user clicks inside a note area and types characters
@@ -24,6 +24,10 @@ Every note panel SHALL show one plain-text note area in place of the previous gr
 #### Scenario: Greeting and clock removed
 - **WHEN** the app launches
 - **THEN** no panel shows greeting text or a clock
+
+#### Scenario: No other formatting
+- **WHEN** the user pastes text with colors and links into a note area
+- **THEN** the note shows the text with no colors and no links
 
 ### Requirement: End editing
 The user SHALL be able to end editing from the keyboard and with the pointer. Pressing Esc, or clicking the window's drag area or bottom bar, MUST end editing. Ending editing MUST remove keyboard focus from the note area and MUST keep the note text. A click on the drag area or bottom bar MUST end editing also when the user then drags the window.
@@ -68,7 +72,7 @@ The text of every note SHALL persist across app quit and relaunch. Changes MUST 
 - **THEN** the next launch shows that note's full text including the last keystroke
 
 ### Requirement: Panel stays movable
-The user SHALL be able to move the panel by dragging a visible area that is not the text. Every note window MUST show a drag area across its top edge and a bottom bar across its bottom edge. Both MUST span the full width of the window. The bottom bar MUST be 20% lower than the drag area. Both MUST show a shaded fill that sets them apart from the note area: darker than the note area in light appearance and lighter in dark appearance. The drag area MUST NOT show a grip mark. The bottom bar MUST show only the font button and the text size button, at its trailing edge. Dragging the drag area, or the bottom bar outside its buttons, MUST move the panel. The note area MUST end above the bottom bar, so no note text shows under it. Dragging inside the text MUST select text and MUST NOT move the panel.
+The user SHALL be able to move the panel by dragging a visible area that is not the text. Every note window MUST show a drag area across its top edge and a bottom bar across its bottom edge. Both MUST span the full width of the window. The bottom bar MUST be 20% lower than the drag area. Both MUST show a shaded fill that sets them apart from the note area: darker than the note area in light appearance and lighter in dark appearance. The drag area MUST NOT show a grip mark. The bottom bar of a note window MUST show only the Bold, Italic, and Underline buttons at its leading edge, and the font button and the text size button at its trailing edge. Dragging the drag area, or the bottom bar outside its buttons, MUST move the panel. The note area MUST end above the bottom bar, so no note text shows under it. Dragging inside the text MUST select text and MUST NOT move the panel.
 
 #### Scenario: Drag the drag area
 - **WHEN** the user drags the panel's drag area
@@ -80,7 +84,7 @@ The user SHALL be able to move the panel by dragging a visible area that is not 
 
 #### Scenario: Bottom bar controls
 - **WHEN** a note window is open
-- **THEN** its bottom bar shows the font button and the text size button at the trailing edge, and no other controls
+- **THEN** its bottom bar shows the Bold, Italic, and Underline buttons at the leading edge, the font button and the text size button at the trailing edge, and no other controls
 
 #### Scenario: Drag inside text
 - **WHEN** the user drags across text in the note area
