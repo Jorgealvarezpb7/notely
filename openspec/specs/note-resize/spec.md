@@ -23,15 +23,15 @@ The user SHALL be able to resize every note window by dragging any of its edges 
 - **THEN** the second window keeps its size, position, and text
 
 ### Requirement: Size limits
-A note window MUST NOT become smaller than 160 points wide or 120 points high, so that every bottom bar button fits. This limit MUST hold during every resize, from every edge and corner, and MUST apply to list windows too. A note window MUST NOT become larger than the visible area of the screen it is on. At every allowed size, the "−" and trash buttons MUST show fully inside the window, whatever the length of the note text, list title, or list items. A note saved smaller than the minimum size MUST open at the minimum size.
+A note window MUST NOT become smaller than 190 points wide or 120 points high, so that every bottom bar button fits. This limit MUST hold during every resize, from every edge and corner, and MUST apply to list windows too. A note window MUST NOT become larger than the visible area of the screen it is on. At every allowed size, the "−" and trash buttons MUST show fully inside the window, whatever the length of the note text, list title, or list items. A note saved smaller than the minimum size MUST open at the minimum size.
 
 #### Scenario: Shrink below minimum
-- **WHEN** the user drags a note window's corner inward past 160 by 120 points
-- **THEN** the window stops at 160 points wide and 120 points high
+- **WHEN** the user drags a note window's corner inward past 190 by 120 points
+- **THEN** the window stops at 190 points wide and 120 points high
 
 #### Scenario: Drag an edge past the minimum width
-- **WHEN** the user drags the left or right edge of a note window inward past 160 points wide
-- **THEN** the window stops at 160 points wide
+- **WHEN** the user drags the left or right edge of a note window inward past 190 points wide
+- **THEN** the window stops at 190 points wide
 - **AND** the "−" and trash buttons show fully inside the window
 
 #### Scenario: Controls stay visible at minimum size
@@ -41,17 +41,17 @@ A note window MUST NOT become smaller than 160 points wide or 120 points high, s
 - **AND** its note area shows at least one line of text
 
 #### Scenario: Long list item at minimum width
-- **WHEN** a list window has an item whose text is wider than the window and the user shrinks the window to 160 points wide
+- **WHEN** a list window has an item whose text is wider than the window and the user shrinks the window to 190 points wide
 - **THEN** the "−" and trash buttons show fully inside the window
 - **AND** the item's text wraps within the window's width
 
 #### Scenario: Saved size below new minimum
 - **WHEN** the app launches with a note saved at 60 by 100 points
-- **THEN** that note's window opens at 160 by 120 points
+- **THEN** that note's window opens at 190 by 120 points
 
 #### Scenario: Note saved at the old minimum
-- **WHEN** the app launches with a note saved at 110 by 150 points by an earlier version
-- **THEN** that note's window opens at 160 by 150 points
+- **WHEN** the app launches with a note saved at 160 by 150 points by an earlier version
+- **THEN** that note's window opens at 190 by 150 points
 
 ### Requirement: Note size persists
 Every note window SHALL open at the size it had when the app last quit. A note with no saved size MUST open at 220 by 150 points. When a note's saved size does not fit inside the visible area of the screen where the window opens, the window MUST shrink to fit that visible area.
