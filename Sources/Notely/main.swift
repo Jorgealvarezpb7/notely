@@ -45,6 +45,8 @@ struct StyleRun: Codable, Equatable {
 ///
 /// `styles` holds a note's bold, italic, and underlined ranges. `text`
 /// stays plain, so a build without styles still shows the note's text.
+///
+/// `tint` is the note's color as sRGB "#RRGGBB", or nil for no tint.
 struct Note: Codable, Identifiable {
     let id: UUID
     var text: String
@@ -55,6 +57,7 @@ struct Note: Codable, Identifiable {
     var title: String?
     var items: [ListItem]?
     var styles: [StyleRun]?
+    var tint: String?
 
     static let listKind = "list"
 
@@ -126,6 +129,14 @@ final class NoteStore: ObservableObject {
     func setOrigin(_ origin: String, for id: UUID) {
         guard let index = notes.firstIndex(where: { $0.id == id }) else { return }
         notes[index].origin = origin
+        save()
+    }
+
+    /// `nil` removes the tint.
+    func setTint(_ tint: String?, for id: UUID) {
+        guard let index = notes.firstIndex(where: { $0.id == id }),
+              notes[index].tint != tint else { return }
+        notes[index].tint = tint
         save()
     }
 
@@ -500,6 +511,9 @@ struct StripButton: NSViewRepresentable {
     /// off. The button never takes keyboard focus, so the note keeps its
     /// selection.
     var isOn: Bool? = nil
+    /// Set for a color swatch (the tint button): the symbol shows in this
+    /// color instead of the bar's icon color.
+    var color: NSColor? = nil
     let action: (NSButton) -> Void
 
     func makeNSView(context: Context) -> NSButton {
@@ -509,8 +523,6 @@ struct StripButton: NSViewRepresentable {
         if isOn != nil {
             button.refusesFirstResponder = true
         }
-        button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: accessibilityLabel)
-        button.image?.isTemplate = true
         button.setAccessibilityLabel(accessibilityLabel)
         button.target = context.coordinator
         button.action = #selector(Coordinator.fire(_:))
@@ -519,8 +531,16 @@ struct StripButton: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSButton, context: Context) {
         context.coordinator.action = action
+        // The tint button switches between "circle" and "circle.fill".
+        if context.coordinator.symbolName != symbolName {
+            context.coordinator.symbolName = symbolName
+            nsView.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: accessibilityLabel)
+            nsView.image?.isTemplate = true
+        }
         if let isOn {
             nsView.contentTintColor = isOn ? .labelColor : .secondaryLabelColor
+        } else {
+            nsView.contentTintColor = color
         }
     }
 
@@ -530,6 +550,7 @@ struct StripButton: NSViewRepresentable {
 
     final class Coordinator: NSObject {
         var action: (NSButton) -> Void
+        var symbolName: String?
         init(action: @escaping (NSButton) -> Void) { self.action = action }
         @objc func fire(_ sender: NSButton) { action(sender) }
     }
@@ -545,6 +566,25 @@ let barGap: CGFloat = 4
 /// Shade of both bars: `primary` is black in light appearance and white
 /// in dark appearance, so the bars show darker or lighter than the note.
 let barFill = Color.primary.opacity(0.08)
+
+/// Strength of a note's tint over the material: one value for every
+/// color, low enough that the desktop always shows through.
+let tintStrength = 0.2
+
+/// The background of note and list windows: the translucent material,
+/// with the note's tint, if any, as a faint wash over it.
+struct NoteBackground: View {
+    let tint: String?
+
+    var body: some View {
+        ZStack {
+            Rectangle().fill(.ultraThinMaterial)
+            if let color = tintColor(tint) {
+                Color(nsColor: color).opacity(tintStrength)
+            }
+        }
+    }
+}
 
 /// Fill of the logo in the top bar, a stronger tint of `barFill`'s color:
 /// black in light appearance and white in dark appearance, quieter than
@@ -663,19 +703,22 @@ struct NoteStrip: View {
 let bottomBarHeight = (barHeight * 0.8).rounded()
 
 /// The bottom bar of note and list windows: drags the window and ends
-/// editing, with the font button and the text size button at the
-/// trailing edge. Note windows pass their editor state and also get the
-/// style buttons at the leading edge.
+/// editing, with the font button, the text size button, and the tint
+/// button at the trailing edge. Note windows pass their editor state and
+/// also get the style buttons at the leading edge.
 struct BottomBar: View {
+    @ObservedObject var store: NoteStore
     @ObservedObject var appearance: TextAppearance
+    let id: UUID
     var editorState: NoteEditorState? = nil
     @StateObject private var controls = AppearanceControls()
+    @StateObject private var tintControls = TintControls()
 
     var body: some View {
         // The buttons sit on top of the click target, as in the top bar.
         ZStack {
             EndEditingView(drags: true)
-            // Fits five buttons in the minimum note width.
+            // Fits six buttons in the minimum note width.
             HStack(spacing: 0) {
                 if let editorState {
                     StyleButtons(state: editorState)
@@ -691,6 +734,15 @@ struct BottomBar: View {
                     StripButton(symbolName: "textformat.size", accessibilityLabel: "Text Size") { button in
                         controls.appearance = appearance
                         controls.toggleSizePopover(from: button)
+                    }
+                    .frame(width: StripButton.referenceSize.width,
+                           height: StripButton.referenceSize.height)
+                    let tint = tintColor(store.note(id)?.tint)
+                    StripButton(symbolName: tint == nil ? "circle" : "circle.fill",
+                                accessibilityLabel: "Note Color", color: tint) { button in
+                        tintControls.store = store
+                        tintControls.id = id
+                        tintControls.showMenu(from: button)
                     }
                     .frame(width: StripButton.referenceSize.width,
                            height: StripButton.referenceSize.height)
@@ -755,6 +807,128 @@ final class AppearanceControls: NSObject, ObservableObject, NSPopoverDelegate {
     func popoverDidClose(_ notification: Notification) {
         popover = nil
         popoverClosedAt = Date()
+    }
+}
+
+/// Opens the bottom bar's tint menu and sends the shared color panel's
+/// changes to one note. A class, so it can be the target of the menu
+/// items and the color panel.
+final class TintControls: NSObject, ObservableObject {
+    var store: NoteStore?
+    var id: UUID?
+    /// The note's window, from the tint button. The color panel closes
+    /// when it closes.
+    private weak var window: NSWindow?
+
+    /// The controls the color panel sends its changes to. `NSColorPanel`
+    /// is shared, and a new target replaces the old one, so the window
+    /// that last chose "Other Colors…" owns it. An identifier, not a weak
+    /// reference: a weak reference already reads nil in `deinit`.
+    private static var panelOwner: ObjectIdentifier?
+
+    func showMenu(from button: NSButton) {
+        guard let store, let id else { return }
+        window = button.window
+        let current = store.note(id)?.tint
+        let menu = NSMenu()
+        let none = NSMenuItem(title: "Default", action: #selector(choose(_:)), keyEquivalent: "")
+        none.target = self
+        none.state = tintColor(current) == nil ? .on : .off
+        menu.addItem(none)
+        menu.addItem(.separator())
+        for preset in tintPresets {
+            let item = NSMenuItem(title: preset.name, action: #selector(choose(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = preset.tint
+            item.image = tintColor(preset.tint).map(Self.swatch)
+            item.state = preset.tint == current ? .on : .off
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        let other = NSMenuItem(title: "Other Colors…", action: #selector(showColorPanel(_:)), keyEquivalent: "")
+        other.target = self
+        menu.addItem(other)
+        // Below the button, as the font menu.
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+    }
+
+    /// A filled circle in `color`, for a preset's menu entry.
+    private static func swatch(_ color: NSColor) -> NSImage {
+        NSImage(size: NSSize(width: 12, height: 12), flipped: false) { rect in
+            color.setFill()
+            NSBezierPath(ovalIn: rect.insetBy(dx: 0.5, dy: 0.5)).fill()
+            return true
+        }
+    }
+
+    /// "Default" has no represented object, so it removes the tint.
+    @objc private func choose(_ sender: NSMenuItem) {
+        guard let id else { return }
+        store?.setTint(sender.representedObject as? String, for: id)
+    }
+
+    @objc private func showColorPanel(_ sender: NSMenuItem) {
+        guard let store, let id else { return }
+        let panel = NSColorPanel.shared
+        panel.showsAlpha = false
+        // Drop the old target first: setting the color sends the action,
+        // which must not reach the previous note.
+        panel.setTarget(nil)
+        panel.setAction(nil)
+        panel.color = tintColor(store.note(id)?.tint) ?? .white
+        panel.setTarget(self)
+        panel.setAction(#selector(panelChanged(_:)))
+        Self.panelOwner = ObjectIdentifier(self)
+        // "−" and delete both close the window, so one observer covers
+        // both. Observers added with a selector go away with `self`.
+        NotificationCenter.default.removeObserver(self, name: NSWindow.willCloseNotification, object: nil)
+        // A nil object would observe every window, so skip it.
+        if let window {
+            NotificationCenter.default.addObserver(self, selector: #selector(windowWillClose(_:)),
+                                                   name: NSWindow.willCloseNotification, object: window)
+        }
+        panel.orderFront(nil)
+    }
+
+    /// Closes the color panel with the note it changes. When another
+    /// note owns the panel, it stays open.
+    @objc private func windowWillClose(_ notification: Notification) {
+        NotificationCenter.default.removeObserver(self, name: NSWindow.willCloseNotification, object: nil)
+        guard releasePanel() else { return }
+        NSColorPanel.shared.orderOut(nil)
+    }
+
+    /// Closes the color panel, whichever note owns it. The panel floats
+    /// above every window, so it would cover a delete confirmation sheet.
+    static func closePanel() {
+        guard panelOwner != nil else { return }
+        panelOwner = nil
+        NSColorPanel.shared.setTarget(nil)
+        NSColorPanel.shared.setAction(nil)
+        NSColorPanel.shared.orderOut(nil)
+    }
+
+    /// Stops the color panel from sending changes here, if this owns it.
+    /// Returns whether it did.
+    @discardableResult
+    private func releasePanel() -> Bool {
+        guard Self.panelOwner == ObjectIdentifier(self) else { return false }
+        Self.panelOwner = nil
+        NSColorPanel.shared.setTarget(nil)
+        NSColorPanel.shared.setAction(nil)
+        return true
+    }
+
+    /// `tintString` drops alpha, so an eyedropper color from a
+    /// translucent area saves at full opacity.
+    @objc private func panelChanged(_ sender: NSColorPanel) {
+        guard let id, let tint = tintString(sender.color) else { return }
+        store?.setTint(tint, for: id)
+    }
+
+    /// The panel may not clear a target that goes away.
+    deinit {
+        releasePanel()
     }
 }
 
@@ -828,10 +1002,10 @@ struct NoteView: View {
             NoteStrip(onClose: onClose, onDelete: onDelete)
         }
         .overlay(alignment: .bottom) {
-            BottomBar(appearance: appearance, editorState: editorState)
+            BottomBar(store: store, appearance: appearance, id: id, editorState: editorState)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.ultraThinMaterial)
+        .background(NoteBackground(tint: store.note(id)?.tint))
         // Fill the transparent title bar too, so the top bar sits at the
         // top edge of the window.
         .ignoresSafeArea()
@@ -2022,10 +2196,10 @@ struct ListView: View {
             NoteStrip(onClose: onClose, onDelete: onDelete)
         }
         .overlay(alignment: .bottom) {
-            BottomBar(appearance: appearance)
+            BottomBar(store: store, appearance: appearance, id: id)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.ultraThinMaterial)
+        .background(NoteBackground(tint: store.note(id)?.tint))
         // Fill the transparent title bar too, as in note windows.
         .ignoresSafeArea()
     }
@@ -2293,9 +2467,9 @@ func clamp(_ frame: NSRect, into screen: NSRect) -> NSPoint {
 }
 
 /// Smallest size a note or list window can have: wide enough for the
-/// five bottom bar buttons of a note, and room for the bottom bar and one
+/// six bottom bar buttons of a note, and room for the bottom bar and one
 /// line of text.
-let minimumNoteSize = NSSize(width: 160, height: 120)
+let minimumNoteSize = NSSize(width: 190, height: 120)
 
 /// Size of a note with no saved size.
 let defaultNoteSize = NSSize(width: 220, height: 150)
@@ -2325,6 +2499,39 @@ func savedSize(_ saved: String?) -> NSSize {
     guard let pair = parsePair(saved) else { return defaultNoteSize }
     return NSSize(width: pair.0, height: pair.1)
 }
+
+/// A tint as saved in `Note.tint`: sRGB "#RRGGBB". Alpha is dropped, so
+/// no color can make a note's tint stronger than `tintStrength`.
+func tintString(_ color: NSColor) -> String? {
+    guard let rgb = color.usingColorSpace(.sRGB) else { return nil }
+    let channel = { (value: CGFloat) in Int((min(max(value, 0), 1) * 255).rounded()) }
+    return String(format: "#%02X%02X%02X",
+                  channel(rgb.redComponent), channel(rgb.greenComponent), channel(rgb.blueComponent))
+}
+
+/// The color of a saved tint, or nil when nothing usable is saved.
+func tintColor(_ saved: String?) -> NSColor? {
+    guard let saved, saved.count == 7, saved.first == "#",
+          saved.dropFirst().allSatisfy(\.isHexDigit),
+          let value = UInt32(saved.dropFirst(), radix: 16) else { return nil }
+    return NSColor(srgbRed: CGFloat((value >> 16) & 0xFF) / 255,
+                   green: CGFloat((value >> 8) & 0xFF) / 255,
+                   blue: CGFloat(value & 0xFF) / 255,
+                   alpha: 1)
+}
+
+/// The tint menu's preset colors, in menu order. Fixed values, not system
+/// colors: system colors change with the appearance, so a saved preset
+/// would stop matching its menu entry.
+let tintPresets: [(name: String, tint: String)] = [
+    ("Yellow", "#FFD60A"),
+    ("Orange", "#FF9F0A"),
+    ("Pink", "#FF375F"),
+    ("Purple", "#BF5AF2"),
+    ("Blue", "#0A84FF"),
+    ("Green", "#30D158"),
+    ("Gray", "#8E8E93"),
+]
 
 /// `size` capped at `screen`'s size and floored at `minimum`.
 func fit(_ size: NSSize, into screen: NSRect, minimum: NSSize = minimumNoteSize) -> NSSize {
@@ -2771,6 +2978,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let window = windows[id], window.attachedSheet == nil,
               let note = store.note(id) else { return }
         let name = note.isList ? listTitle(note.title) : noteTitle(note.text)
+        TintControls.closePanel()
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Delete “\(name)”?"
