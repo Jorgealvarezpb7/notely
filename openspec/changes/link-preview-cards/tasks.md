@@ -14,14 +14,14 @@ All code is in `Sources/Notely/main.swift`. Build and run steps need the macOS h
 - [x] 2.2 Add `LinkCardLayout.height(for:width:)` and the SwiftUI `LinkCard`: image at 1.91:1, aspect-fill and clipped; bold title of at most 2 lines; gray description of at most 4 lines ending in "…"; footer with the `link` symbol, the domain without "www.", and a round 18 pt icon at the trailing edge; compact layout without an image. Verify: SwiftUI previews or a debug window show the full card, the compact card, and a card with no description, and each drawn height equals `LinkCardLayout.height` at widths 190, 300, and 500.
 - [x] 2.3 Replace the fixed spike spacing with each paragraph's first-link card height from `LinkCardLayout`, only when `LinkPageStore` has that link's page. Invalidate the paragraph's layout when a page arrives, when the width changes, and when the font setting changes. Verify: in a note, "see https://crunchyroll.com" gets exactly the card's height of space above it, and "apple.com or crunchyroll.com" gets space for one card.
 - [x] 2.4 Add `LinkCardHost` (an `NSHostingView` around `LinkCard`) and place a host per paragraph after layout, at the fragment's top minus the card height and the full text width. Remove hosts whose paragraph lost its link. Verify: cards sit directly above their lines while typing, scrolling, resizing the note, and changing the font, and deleting the address removes the card and pulls the text up.
-- [ ] 2.5 Make card clicks open the link: `acceptsFirstMouse` returns true, `mouseDown` opens the URL with `NSWorkspace`, and a pointing-hand cursor rect covers the card. Verify: clicking a card opens the browser without moving the caret or selection, also while Notely is inactive, and the pointer is a hand over the card.
-- [ ] 2.6 Add the 1 s debounced request after text changes, and the immediate request on `load(text:runs:)`. Verify: typing "crunchyroll.com" one character at a time sends one request about 1 s after the last key, and opening a note with links requests its pages at once.
-- [ ] 2.7 Verify display only: copying text across a card puts only text on the pasteboard, undo/redo never touches cards, and the saved note in `UserDefaults` is unchanged after cards show and after a relaunch.
+- [x] 2.5 Make card clicks open the link: `acceptsFirstMouse` returns true, `mouseDown` opens the URL with `NSWorkspace`, and a pointing-hand cursor rect covers the card. Verify: clicking a card opens the browser without moving the caret or selection, also while Notely is inactive, and the pointer is a hand over the card.
+- [x] 2.6 Add the 1 s debounced request after text changes, and the immediate request on `load(text:runs:)`. Verify: typing "crunchyroll.com" one character at a time sends one request about 1 s after the last key, and opening a note with links requests its pages at once.
+- [x] 2.7 Verify display only: copying text across a card puts only text on the pasteboard, undo/redo never touches cards, and the saved note in `UserDefaults` is unchanged after cards show and after a relaunch.
 
 ## 3. Cards in lists
 
 - [x] 3.1 In `ListView.rowView(_:)`, wrap each item in a `VStack` that shows `LinkCard` above the `HStack` for the item's first link once its page is stored, indented to the text column. Do the same for the list title, without the indent. Verify: "buy at store.example.com" shows a card above the item's text, with the check circle still beside the text, and the title shows a card too.
-- [ ] 3.2 Add the tap-to-open and hover pointing hand on the list card, and the 1 s debounced request on item and title edits. Verify: clicking a list card opens the browser without starting row editing, and a typed address fetches once after typing stops.
+- [x] 3.2 Add the tap-to-open and hover pointing hand on the list card, and the 1 s debounced request on item and title edits. Verify: clicking a list card opens the browser without starting row editing, and a typed address fetches once after typing stops.
 
 ## 4. Remove the Cmd+hover preview
 
@@ -30,7 +30,7 @@ All code is in `Sources/Notely/main.swift`. Build and run steps need the macOS h
 
 ## 5. Integration check
 
-- [ ] 5.1 End-to-end on the macOS host with `just run`, going through the spec scenarios in `specs/links/spec.md`:
+- [x] 5.1 End-to-end on the macOS host with `just run`, going through the spec scenarios in `specs/links/spec.md`:
   - a note with two link paragraphs;
   - a list with a link item and a link title;
   - the network turned off with an uncached address (no card, no error);
