@@ -1,10 +1,6 @@
-# links Specification
+# Spec Delta
 
-## Purpose
-
-Lets the user keep web addresses in notes and lists as links: shown as links, opened in the browser with Cmd+click, and previewed at all times by a card above each paragraph or list row that has one.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Web addresses show as links
 Every web address in note text, in a list's title, or in a list item SHALL show as a link: in the link color and underlined, in the font, size, and styles the text has otherwise. A web address is text that starts with "http://" or "https://", or a domain name with a known top-level domain, such as "apple.com" or "www.apple.com/mac", with an optional path. Email addresses, phone numbers, and other kinds of addresses MUST NOT show as links. Links MUST update as the user types, pastes, cuts, undoes, or redoes, without moving the caret or the selection. Links MUST NOT change the saved text or styles, the undo history, or the text that Copy puts on the pasteboard. Link formatting in pasted rich text MUST NOT make text a link; only text that is itself a web address shows as a link. A checked list item MUST show its links struck through, in the link color. The link color is blue (#1D4ED8) in light appearance and the system link color in dark appearance.
@@ -45,37 +41,7 @@ Every web address in note text, in a list's title, or in a list item SHALL show 
 - **WHEN** the Mac uses dark appearance and a note shows "https://apple.com"
 - **THEN** "https://apple.com" shows in the system link color and underlined
 
-### Requirement: Cmd+click opens a link
-Clicking a link while holding Cmd SHALL open its address in the default web browser. An address without "http://" or "https://" MUST open with "http://" added. The click MUST NOT place the caret, select text, start editing a list row, or move the window. A click on a link without Cmd MUST behave as a click on any other text: it places the caret and edits. Cmd+click outside a link MUST behave as it does today. Cmd+click MUST work in notes and list rows whether or not they are being edited, and on the first click while Notely is not the active app.
-
-#### Scenario: Open a link from a note
-- **WHEN** the user holds Cmd and clicks "https://apple.com" in a note
-- **THEN** the default browser opens https://apple.com
-- **AND** the note's caret and selection do not change
-
-#### Scenario: Open a link from a list item that is not being edited
-- **WHEN** no list row has keyboard focus and the user holds Cmd and clicks a link in an item
-- **THEN** the default browser opens the link
-- **AND** the item does not start editing
-
-#### Scenario: Plain click edits
-- **WHEN** the user clicks a link in a note without holding Cmd
-- **THEN** the caret moves to the clicked position in the link and no browser opens
-
-#### Scenario: Address without a scheme opens
-- **WHEN** the user Cmd+clicks "store.example.com"
-- **THEN** the browser opens http://store.example.com
-
-### Requirement: Pointer over a link
-While Notely is the active app and the user holds Cmd with the pointer over a link, the pointer SHALL show as a pointing hand. Releasing Cmd or moving the pointer off the link MUST bring back the pointer that shows over text.
-
-#### Scenario: Hold Cmd over a link
-- **WHEN** the pointer rests on a link and the user presses Cmd
-- **THEN** the pointer changes to a pointing hand
-
-#### Scenario: Release Cmd
-- **WHEN** the pointer shows a pointing hand over a link and the user releases Cmd
-- **THEN** the pointer changes back to the text pointer
+## ADDED Requirements
 
 ### Requirement: Preview card above a paragraph with a link
 A note paragraph, a list title, or a list item that contains a web address SHALL show a preview card above its text once the page information for its first web address is available. Other web addresses in the same paragraph, title, or item MUST NOT add cards. A paragraph is the text between line breaks. In a note, the card MUST be as wide as the note's text area and follow the text as it wraps, scrolls, and resizes.
@@ -176,3 +142,9 @@ Cards MUST NOT change a note's or list's saved text or styles, the undo history,
 #### Scenario: Saved text unchanged
 - **WHEN** a note shows cards and the app is quit and launched again
 - **THEN** the note's saved text is the same characters with the same styles as before the cards showed
+
+## REMOVED Requirements
+
+### Requirement: Link preview while Cmd is held
+**Reason**: Previews now show at all times as cards above each paragraph with a link, so the Cmd+hover popover card is redundant.
+**Migration**: The always-visible card replaces it. Cmd+click on a link still opens it, and the pointing hand still shows while Cmd is held over a link.
