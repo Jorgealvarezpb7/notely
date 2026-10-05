@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Lets the user keep web addresses in notes and lists as links: shown as links, opened in the browser with Cmd+click, and previewed while Cmd is held over them.
+Lets the user keep web addresses in notes and lists as links: shown as links, opened in the browser with Cmd+click, and previewed at all times by a card above each paragraph or list row that has one.
 
 ## Requirements
 

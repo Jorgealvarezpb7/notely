@@ -1,5 +1,6 @@
 import AppKit
-import LinkPresentation
+import CryptoKit
+import ImageIO
 import SwiftUI
 
 /// One checklist item. A list's `items` are kept in display order: the
@@ -1064,9 +1065,18 @@ enum LinkDetector {
     }
 }
 
+/// Link color: a stronger blue (#1D4ED8) than the system link color in light
+/// appearance, where the system blue reads poorly on light and tinted
+/// notes; the system link color in dark appearance.
+let noteLinkColor = NSColor(name: nil) { appearance in
+    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        ? .linkColor
+        : NSColor(srgbRed: 0x1D / 255, green: 0x4E / 255, blue: 0xD8 / 255, alpha: 1)
+}
+
 /// Link color and underline, as list rows and text views show links.
 let linkDisplayAttributes: [NSAttributedString.Key: Any] = [
-    .foregroundColor: NSColor.linkColor,
+    .foregroundColor: noteLinkColor,
     .underlineStyle: NSUnderlineStyle.single.rawValue,
 ]
 
@@ -1148,9 +1158,8 @@ extension LinkHost {
 }
 
 /// Watches Cmd and the pointer while Notely is active. With Cmd held over
-/// a link, shows the pointing hand and, after half a second, the link's
-/// preview card. Scrolling, typing, clicking, releasing Cmd, leaving the
-/// link, or switching apps closes the card.
+/// a link, shows the pointing hand. Scrolling, typing, clicking, releasing
+/// Cmd, leaving the link, or switching apps puts the text pointer back.
 final class LinkHoverController {
     static let shared = LinkHoverController()
 
@@ -1158,8 +1167,6 @@ final class LinkHoverController {
     private weak var host: NSView?
     private var url: URL?
     private var rect: NSRect = .zero
-    private var timer: Timer?
-    private var popover: NSPopover?
 
     /// True while Cmd is held over a link; hosts keep the pointing hand.
     var isActive: Bool { url != nil && host != nil }
@@ -1226,9 +1233,6 @@ final class LinkHoverController {
         url = link.url
         rect = link.rect
         applyCursor()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self] _ in
-            self?.showPreview()
-        }
     }
 
     /// Text views set the I-beam in their own handling of the same event,
@@ -1240,133 +1244,600 @@ final class LinkHoverController {
         }
     }
 
-    private func showPreview() {
-        guard let host, let url, host.window != nil else { return }
-        let controller = LinkPreviewViewController(url: url)
-        let popover = NSPopover()
-        popover.behavior = .applicationDefined
-        popover.animates = false
-        popover.contentViewController = controller
-        controller.onResize = { [weak popover] size in
-            popover?.contentSize = size
-        }
-        // A popover never becomes key, so keyboard focus stays put.
-        popover.show(relativeTo: rect, of: host, preferredEdge: .maxY)
-        self.popover = popover
-        LinkPreviewStore.shared.metadata(for: url) { [weak controller] metadata in
-            controller?.show(metadata)
-        }
-    }
-
-    /// Closes the card and forgets the link.
+    /// Forgets the link.
     func reset() {
-        timer?.invalidate()
-        timer = nil
-        popover?.close()
-        popover = nil
         host = nil
         url = nil
     }
 }
 
-/// Page previews for the session: fetched only when a card is about to
-/// show, at most one request per address at a time, and kept until quit.
-/// A failed request is not kept, so a later preview tries again.
-final class LinkPreviewStore {
-    static let shared = LinkPreviewStore()
+// MARK: Link cards
 
-    private var cache: [URL: LPLinkMetadata] = [:]
-    private var providers: [URL: LPMetadataProvider] = [:]
-    private var waiting: [URL: [(LPLinkMetadata) -> Void]] = [:]
+/// A linked page as its card shows it.
+struct LinkPage {
+    let title: String
+    let description: String?
+    let image: NSImage?
+    let icon: NSImage?
+}
 
-    func metadata(for url: URL, completion: @escaping (LPLinkMetadata) -> Void) {
-        if let metadata = cache[url] {
-            completion(metadata)
-            return
+/// What the page's `<head>` says about it: title, description, preview
+/// image, and site icons, best first.
+struct PageHead {
+    var title: String?
+    var description: String?
+    var image: URL?
+    var icons: [URL] = []
+
+    private static let tagPattern = try! NSRegularExpression(
+        pattern: #"<(meta|link)\b[^>]*>"#, options: [.caseInsensitive])
+    private static let attributePattern = try! NSRegularExpression(
+        pattern: #"([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))"#)
+    private static let titlePattern = try! NSRegularExpression(
+        pattern: #"<title\b[^>]*>([\s\S]*?)</title>"#, options: [.caseInsensitive])
+    private static let entityPattern = try! NSRegularExpression(
+        pattern: #"&(#[0-9]+|#[xX][0-9a-fA-F]+|[a-zA-Z]+);"#)
+
+    /// Reads the head of `html`, resolving relative addresses against `base`.
+    static func parse(_ html: String, base: URL) -> PageHead {
+        var head = html
+        if let end = html.range(of: "</head>", options: .caseInsensitive) {
+            head = String(html[..<end.lowerBound])
         }
-        waiting[url, default: []].append(completion)
-        guard providers[url] == nil else { return }
-        let provider = LPMetadataProvider()
-        provider.timeout = 10
-        providers[url] = provider
-        provider.startFetchingMetadata(for: url) { metadata, _ in
-            DispatchQueue.main.async {
-                self.providers[url] = nil
-                let callbacks = self.waiting.removeValue(forKey: url) ?? []
-                guard let metadata else { return }
-                self.cache[url] = metadata
-                callbacks.forEach { $0(metadata) }
+        let text = head as NSString
+        var meta: [String: String] = [:]
+        var touchIcons: [URL] = []
+        var icons: [URL] = []
+        for match in tagPattern.matches(in: head, range: NSRange(location: 0, length: text.length)) {
+            let tag = text.substring(with: match.range)
+            let attributes = Self.attributes(of: tag)
+            if text.substring(with: match.range(at: 1)).lowercased() == "meta" {
+                guard let key = (attributes["property"] ?? attributes["name"] ?? attributes["itemprop"])?.lowercased(),
+                      let content = attributes["content"], meta[key] == nil else { continue }
+                meta[key] = content
+            } else {
+                guard let rel = attributes["rel"]?.lowercased(), let href = attributes["href"],
+                      let url = Self.url(href, base: base) else { continue }
+                let tokens = rel.split(separator: " ")
+                if tokens.contains(where: { $0.hasPrefix("apple-touch-icon") }) {
+                    touchIcons.append(url)
+                } else if tokens.contains("icon") {
+                    icons.append(url)
+                }
             }
+        }
+        var result = PageHead()
+        var pageTitle: String?
+        if let match = titlePattern.firstMatch(in: head, range: NSRange(location: 0, length: text.length)) {
+            pageTitle = text.substring(with: match.range(at: 1))
+        }
+        result.title = [meta["og:title"], meta["twitter:title"], pageTitle].lazy.compactMap { $0.map(Self.clean) }
+            .first { !$0.isEmpty }
+        result.description = [meta["og:description"], meta["twitter:description"], meta["description"]].lazy
+            .compactMap { $0.map(Self.clean) }.first { !$0.isEmpty }
+        result.image = [meta["og:image:secure_url"], meta["og:image"], meta["og:image:url"],
+                        meta["twitter:image"], meta["twitter:image:src"]].lazy
+            .compactMap { $0.flatMap { Self.url($0, base: base) } }.first
+        result.icons = touchIcons + icons
+        return result
+    }
+
+    private static func attributes(of tag: String) -> [String: String] {
+        let text = tag as NSString
+        var result: [String: String] = [:]
+        for match in attributePattern.matches(in: tag, range: NSRange(location: 0, length: text.length)) {
+            let name = text.substring(with: match.range(at: 1)).lowercased()
+            let value = (2...4).lazy.map { match.range(at: $0) }.first { $0.location != NSNotFound }
+                .map { text.substring(with: $0) } ?? ""
+            if result[name] == nil { result[name] = value }
+        }
+        return result
+    }
+
+    /// An http or https address from an attribute, made absolute. http is
+    /// asked for as https: App Transport Security refuses plain http.
+    private static func url(_ value: String, base: URL) -> URL? {
+        let trimmed = decodeEntities(value).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let url = URL(string: trimmed, relativeTo: base)?.absoluteURL,
+              let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return nil }
+        return LinkPageStore.key(for: url)
+    }
+
+    /// Entities decoded and runs of white space made one space.
+    private static func clean(_ value: String) -> String {
+        decodeEntities(value).split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+
+    private static let namedEntities: [String: String] = [
+        "amp": "&", "lt": "<", "gt": ">", "quot": "\"", "apos": "'", "nbsp": " ",
+        "hellip": "…", "mdash": "—", "ndash": "–", "lsquo": "‘", "rsquo": "’",
+        "ldquo": "“", "rdquo": "”", "copy": "©", "reg": "®", "trade": "™",
+    ]
+
+    static func decodeEntities(_ value: String) -> String {
+        guard value.contains("&") else { return value }
+        let text = value as NSString
+        var result = ""
+        var last = 0
+        for match in entityPattern.matches(in: value, range: NSRange(location: 0, length: text.length)) {
+            result += text.substring(with: NSRange(location: last, length: match.range.location - last))
+            let name = text.substring(with: match.range(at: 1))
+            var decoded: String?
+            if name.hasPrefix("#x") || name.hasPrefix("#X") {
+                decoded = UInt32(name.dropFirst(2), radix: 16).flatMap { Unicode.Scalar($0) }.map { String($0) }
+            } else if name.hasPrefix("#") {
+                decoded = UInt32(name.dropFirst()).flatMap { Unicode.Scalar($0) }.map { String($0) }
+            } else {
+                decoded = namedEntities[name.lowercased()]
+            }
+            result += decoded ?? text.substring(with: match.range)
+            last = NSMaxRange(match.range)
+        }
+        result += text.substring(from: last)
+        return result
+    }
+}
+
+/// A page's stored information; images are file names in the cache folder.
+struct StoredLinkPage: Codable {
+    var title: String
+    var description: String?
+    var image: String?
+    var icon: String?
+}
+
+/// Downloads a page's head, then its preview image and site icon, saving
+/// both into the cache folder.
+enum LinkPageFetcher {
+    private static let session: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 10
+        configuration.httpAdditionalHeaders = [
+            // Many sites send a bare app shell to browsers and their
+            // page's title, description, and image only to link-preview
+            // crawlers, which they recognize by this token.
+            "User-Agent": "Notely/0.1 (link preview) facebookexternalhit/1.1",
+        ]
+        return URLSession(configuration: configuration)
+    }()
+
+    /// At most this much of a page is read; the head comes first.
+    private static let pageLimit = 1_000_000
+
+    static func fetch(_ url: URL, folder: URL) async -> StoredLinkPage? {
+        guard let fetched = await head(of: url) else { return nil }
+        let (html, finalURL) = fetched
+        let head = PageHead.parse(html, base: finalURL)
+        guard let title = head.title else { return nil }
+        var page = StoredLinkPage(title: title, description: head.description)
+        if let image = head.image {
+            // 600 points wide at most, at 2x.
+            page.image = await save(image, maxPixels: 1200, folder: folder)
+        }
+        let fallback = URL(string: "/favicon.ico", relativeTo: finalURL)?.absoluteURL
+        for icon in head.icons + [fallback].compactMap({ $0 }) {
+            if let name = await save(icon, maxPixels: 64, folder: folder) {
+                page.icon = name
+                break
+            }
+        }
+        return page
+    }
+
+    /// The page's text up to the end of its head, and the address it was
+    /// read from after redirects.
+    private static func head(of url: URL) async -> (String, URL)? {
+        var request = URLRequest(url: url, timeoutInterval: 10)
+        request.setValue("text/html,application/xhtml+xml", forHTTPHeaderField: "Accept")
+        guard let result = try? await session.bytes(for: request),
+              let http = result.1 as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return nil }
+        let bytes = result.0
+        var data = Data()
+        let headEnd = Data("</head>".utf8)
+        let upperHeadEnd = Data("</HEAD>".utf8)
+        do {
+            for try await byte in bytes {
+                data.append(byte)
+                if data.count >= pageLimit { break }
+                if data.count % 16_384 == 0,
+                   data.range(of: headEnd) != nil || data.range(of: upperHeadEnd) != nil { break }
+            }
+        } catch {
+            if data.isEmpty { return nil }
+        }
+        var encoding = String.Encoding.utf8
+        if let name = http.textEncodingName {
+            let cfEncoding = CFStringConvertIANACharSetNameToEncoding(name as CFString)
+            if cfEncoding != kCFStringEncodingInvalidId {
+                encoding = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(cfEncoding))
+            }
+        }
+        guard let html = String(data: data, encoding: encoding) ?? String(data: data, encoding: .isoLatin1)
+        else { return nil }
+        return (html, http.url ?? url)
+    }
+
+    /// Downloads the image at `url`, scales it to `maxPixels` on its long
+    /// side at most, and saves it as PNG (with transparency) or JPEG.
+    /// Returns the file name, or nil when it cannot be read.
+    private static func save(_ url: URL, maxPixels: Int, folder: URL) async -> String? {
+        let digest = SHA256.hash(data: Data(url.absoluteString.utf8)).map { String(format: "%02x", $0) }.joined()
+        if let existing = ["png", "jpg"].map({ "\(digest).\($0)" })
+            .first(where: { FileManager.default.fileExists(atPath: folder.appendingPathComponent($0).path) }) {
+            return existing
+        }
+        guard let result = try? await session.data(from: url),
+              let http = result.1 as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              let source = CGImageSourceCreateWithData(result.0 as CFData, nil) else { return nil }
+        // Icon files hold several sizes; take the largest.
+        var index = 0
+        var largest = 0
+        for candidate in 0..<CGImageSourceGetCount(source) {
+            let properties = CGImageSourceCopyPropertiesAtIndex(source, candidate, nil) as? [CFString: Any]
+            let width = properties?[kCGImagePropertyPixelWidth] as? Int ?? 0
+            if width > largest {
+                largest = width
+                index = candidate
+            }
+        }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixels,
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, index, options as CFDictionary) else { return nil }
+        let alpha = image.alphaInfo
+        let opaque = alpha == .none || alpha == .noneSkipFirst || alpha == .noneSkipLast
+        let name = "\(digest).\(opaque ? "jpg" : "png")"
+        let file = folder.appendingPathComponent(name)
+        guard let destination = CGImageDestinationCreateWithURL(file as CFURL,
+                                                                (opaque ? "public.jpeg" : "public.png") as CFString,
+                                                                1, nil) else { return nil }
+        CGImageDestinationAddImage(destination, image,
+                                   [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
+        return CGImageDestinationFinalize(destination) ? name : nil
+    }
+}
+
+/// Page information for every link, kept on disk in the Caches folder so
+/// later sessions show cards without asking again. Each address is asked
+/// for at most once at a time, four addresses at most at once. A failed
+/// request is not kept, and not tried again until the next launch.
+/// Every property is read and written on the main thread only; a fetch
+/// runs off it and hands its result back there, hence `@unchecked`.
+final class LinkPageStore: ObservableObject, @unchecked Sendable {
+    static let shared = LinkPageStore()
+    /// Posted on the main thread when a page arrives.
+    static let didLoad = Notification.Name("LinkPageStore.didLoad")
+
+    /// Changes when a page arrives, so SwiftUI rows update.
+    @Published private(set) var revision = 0
+
+    private let folder: URL
+    private var stored: [String: StoredLinkPage] = [:]
+    private var loaded: [String: LinkPage] = [:]
+    private var failed: Set<String> = []
+    private var pending: Set<String> = []
+    private var queue: [URL] = []
+    private var running = 0
+
+    private var indexFile: URL { folder.appendingPathComponent("index.json") }
+
+    private init() {
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        folder = caches.appendingPathComponent("com.alvarezjorge.Notely/LinkPages", isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        if let data = try? Data(contentsOf: indexFile),
+           let index = try? JSONDecoder().decode([String: StoredLinkPage].self, from: data) {
+            stored = index
+        }
+    }
+
+    /// The address a page is stored and asked for under: https, without
+    /// a fragment, with a lowercase host and at least "/" as its path.
+    static func key(for url: URL) -> URL {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: true) else { return url }
+        components.scheme = "https"
+        components.fragment = nil
+        components.host = components.host?.lowercased()
+        if components.path.isEmpty { components.path = "/" }
+        return components.url ?? url
+    }
+
+    /// The stored page for `url`, or nil while it has not arrived.
+    func page(for url: URL) -> LinkPage? {
+        let key = Self.key(for: url).absoluteString
+        if let page = loaded[key] { return page }
+        guard let entry = stored[key] else { return nil }
+        let page = LinkPage(title: entry.title, description: entry.description,
+                            image: entry.image.flatMap { NSImage(contentsOf: folder.appendingPathComponent($0)) },
+                            icon: entry.icon.flatMap { NSImage(contentsOf: folder.appendingPathComponent($0)) })
+        loaded[key] = page
+        return page
+    }
+
+    /// Asks for `url`'s page unless it is stored, failed this session, or
+    /// already asked for.
+    func request(_ url: URL) {
+        let key = Self.key(for: url)
+        let name = key.absoluteString
+        guard stored[name] == nil, !failed.contains(name), !pending.contains(name) else { return }
+        pending.insert(name)
+        queue.append(key)
+        startNext()
+    }
+
+    private func startNext() {
+        while running < 4, !queue.isEmpty {
+            let key = queue.removeFirst()
+            running += 1
+            let folder = self.folder
+            Task.detached {
+                let page = await LinkPageFetcher.fetch(key, folder: folder)
+                DispatchQueue.main.async { self.finish(key, page: page) }
+            }
+        }
+    }
+
+    private func finish(_ key: URL, page: StoredLinkPage?) {
+        running -= 1
+        let name = key.absoluteString
+        pending.remove(name)
+        if let page {
+            stored[name] = page
+            loaded[name] = nil
+            if let data = try? JSONEncoder().encode(stored) {
+                try? data.write(to: indexFile, options: .atomic)
+            }
+            revision += 1
+            NotificationCenter.default.post(name: Self.didLoad, object: self)
+        } else {
+            failed.insert(name)
+        }
+        startNext()
+    }
+}
+
+/// Sizes of a card's parts. `height(for:width:)` is the height the card
+/// draws at, so the text can leave exactly that much room for it.
+enum LinkCardLayout {
+    static let cornerRadius: CGFloat = 8
+    static let padding: CGFloat = 10
+    static let textTop: CGFloat = 8
+    static let textSpacing: CGFloat = 2
+    static let footerHeight: CGFloat = 32
+    static let iconSize: CGFloat = 18
+    /// Space between a card and the text under it.
+    static let gap: CGFloat = 6
+    static let titleLines = 2
+    static let descriptionLines = 4
+    static let titleFont = NSFont.systemFont(ofSize: 13, weight: .semibold)
+    static let descriptionFont = NSFont.systemFont(ofSize: 13)
+
+    static func imageHeight(width: CGFloat) -> CGFloat {
+        (width / 1.91).rounded()
+    }
+
+    private static var textHeights: [String: CGFloat] = [:]
+
+    /// Height of `text` wrapped at `width`, `maxLines` lines at most.
+    /// Measured once per text, font, and width.
+    static func textHeight(_ text: String, font: NSFont, width: CGFloat, maxLines: Int) -> CGFloat {
+        guard width > 0 else { return 0 }
+        let key = "\(text)\u{0}\(font.fontName)\u{0}\(font.pointSize)\u{0}\(width)\u{0}\(maxLines)"
+        if let height = textHeights[key] { return height }
+        let lineHeight = ceil(font.ascender - font.descender + font.leading)
+        let rect = (text as NSString).boundingRect(
+            with: NSSize(width: width, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font])
+        let height = min(ceil(rect.height), lineHeight * CGFloat(maxLines))
+        if textHeights.count > 1000 { textHeights.removeAll() }
+        textHeights[key] = height
+        return height
+    }
+
+    static func titleHeight(_ page: LinkPage, width: CGFloat) -> CGFloat {
+        textHeight(page.title, font: titleFont, width: width - 2 * padding, maxLines: titleLines)
+    }
+
+    static func descriptionHeight(_ page: LinkPage, width: CGFloat) -> CGFloat {
+        guard let description = page.description else { return 0 }
+        return textHeight(description, font: descriptionFont, width: width - 2 * padding, maxLines: descriptionLines)
+    }
+
+    /// Heights already measured, by page text, image, and width: text
+    /// views and cards ask for the same height several times per layout.
+    private static var heights: [String: CGFloat] = [:]
+
+    static func height(for page: LinkPage, width: CGFloat) -> CGFloat {
+        let key = "\(page.title)\u{0}\(page.description ?? "")\u{0}\(page.image != nil)\u{0}\(width)"
+        if let height = heights[key] { return height }
+        var height = textTop + titleHeight(page, width: width) + footerHeight
+        if page.image != nil { height += imageHeight(width: width) }
+        if page.description != nil { height += textSpacing + descriptionHeight(page, width: width) }
+        if heights.count > 500 { heights.removeAll() }
+        heights[key] = height
+        return height
+    }
+}
+
+/// A link's card: the page image, the title in bold, the description in
+/// gray, and a footer with a link glyph, the domain, and the site icon.
+/// A page without an image gets the same card without the image area.
+struct LinkCard: View {
+    let page: LinkPage
+    let url: URL
+
+    private var domain: String {
+        let host = url.host ?? url.absoluteString
+        return host.lowercased().hasPrefix("www.") ? String(host.dropFirst(4)) : host
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let width = proxy.size.width
+            VStack(alignment: .leading, spacing: 0) {
+                if let image = page.image {
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: width, height: LinkCardLayout.imageHeight(width: width))
+                        .clipped()
+                }
+                Text(page.title)
+                    .font(Font(LinkCardLayout.titleFont as CTFont))
+                    .foregroundColor(.primary)
+                    .lineLimit(LinkCardLayout.titleLines)
+                    .frame(width: width - 2 * LinkCardLayout.padding,
+                           height: LinkCardLayout.titleHeight(page, width: width), alignment: .topLeading)
+                    .padding(.top, LinkCardLayout.textTop)
+                    .padding(.horizontal, LinkCardLayout.padding)
+                if let description = page.description {
+                    Text(description)
+                        .font(Font(LinkCardLayout.descriptionFont as CTFont))
+                        .foregroundColor(.secondary)
+                        .lineLimit(LinkCardLayout.descriptionLines)
+                        .truncationMode(.tail)
+                        .frame(width: width - 2 * LinkCardLayout.padding,
+                               height: LinkCardLayout.descriptionHeight(page, width: width), alignment: .topLeading)
+                        .padding(.top, LinkCardLayout.textSpacing)
+                        .padding(.horizontal, LinkCardLayout.padding)
+                }
+                HStack(spacing: 6) {
+                    Image(systemName: "link")
+                        .font(.system(size: 12, weight: .medium))
+                    Text(domain)
+                        .font(.system(size: 13))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 6)
+                    if let icon = page.icon {
+                        Image(nsImage: icon)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: LinkCardLayout.iconSize, height: LinkCardLayout.iconSize)
+                            .clipShape(Circle())
+                    }
+                }
+                .foregroundColor(.secondary)
+                .padding(.horizontal, LinkCardLayout.padding)
+                .frame(width: width, height: LinkCardLayout.footerHeight)
+            }
+            .frame(width: width, height: proxy.size.height, alignment: .top)
+            .background(Color.primary.opacity(0.06))
+            .clipShape(RoundedRectangle(cornerRadius: LinkCardLayout.cornerRadius, style: .continuous))
         }
     }
 }
 
-/// The preview card's content: the system link preview, showing the
-/// address until the page's title, site, and image arrive.
-final class LinkPreviewViewController: NSViewController {
-    static let width: CGFloat = 300
-    /// Height of the caption under a preview image: title and site.
-    static let captionHeight: CGFloat = 64
+/// Shows a `LinkCard` in AppKit, in note text views and list rows. Takes
+/// every click inside it: a click opens the link, also while Notely is not
+/// the active app, and never reaches the text under it.
+final class LinkCardHost: NSView {
+    private(set) var url: URL
+    private let hosting: NSHostingView<LinkCard>
 
-    private let linkView: LPLinkView
-    private var heightConstraint: NSLayoutConstraint?
-    /// Called with the new size whenever the card changes height. An open
-    /// popover keeps the size it opened with, so its owner resizes it.
-    var onResize: ((NSSize) -> Void)?
-
-    init(url: URL) {
-        linkView = LPLinkView(url: url)
-        super.init(nibName: nil, bundle: nil)
+    init(url: URL, page: LinkPage) {
+        self.url = url
+        hosting = NSHostingView(rootView: LinkCard(page: page, url: url))
+        super.init(frame: .zero)
+        hosting.sizingOptions = []
+        hosting.frame = bounds
+        hosting.autoresizingMask = [.width, .height]
+        addSubview(hosting)
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is not used")
     }
 
-    /// The link view fills a container of fixed size, so it lays out for
-    /// the card's height rather than its own guess.
-    override func loadView() {
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: Self.width, height: 80))
-        linkView.translatesAutoresizingMaskIntoConstraints = false
-        for orientation in [NSLayoutConstraint.Orientation.horizontal, .vertical] {
-            linkView.setContentHuggingPriority(.defaultLow, for: orientation)
-            linkView.setContentCompressionResistancePriority(.defaultLow, for: orientation)
-        }
-        container.addSubview(linkView)
-        let height = container.heightAnchor.constraint(equalToConstant: 80)
-        NSLayoutConstraint.activate([
-            linkView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            linkView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            linkView.topAnchor.constraint(equalTo: container.topAnchor),
-            linkView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            container.widthAnchor.constraint(equalToConstant: Self.width),
-            height,
-        ])
-        heightConstraint = height
-        view = container
-        resize()
+    /// Shows `page`. Keeps the card as it is when it already shows that
+    /// page, so a new frame only resizes it.
+    func show(url: URL, page: LinkPage) {
+        let current = hosting.rootView.page
+        guard url != self.url || page.title != current.title || page.description != current.description
+                || page.image !== current.image || page.icon !== current.icon else { return }
+        self.url = url
+        hosting.rootView = LinkCard(page: page, url: url)
     }
 
-    func show(_ metadata: LPLinkMetadata) {
-        linkView.metadata = metadata
-        resize(hasImage: metadata.imageProvider != nil || metadata.videoProvider != nil)
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        frame.contains(point) ? self : nil
     }
 
-    /// Fixed width. A page with an image gets a standard height: the image
-    /// at the 1.91:1 shape of page preview images, plus the caption.
-    /// Without an image, the link view's own height, 80 points at least.
-    private func resize(hasImage: Bool = false) {
-        let height: CGFloat
-        if hasImage {
-            height = (Self.width / 1.91).rounded() + Self.captionHeight
-        } else {
-            let natural = linkView.intrinsicContentSize.height
-            height = natural != NSView.noIntrinsicMetric ? max(natural, 80) : 80
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        LinkHoverController.shared.reset()
+        NSWorkspace.shared.open(url)
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.cursorUpdate, .activeAlways, .inVisibleRect],
+                                       owner: self))
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        NSCursor.pointingHand.set()
+    }
+}
+
+/// A list row's card in SwiftUI, as tall as the card at the row's width.
+struct LinkCardRow: NSViewRepresentable {
+    let url: URL
+    let page: LinkPage
+
+    func makeNSView(context: Context) -> LinkCardHost {
+        LinkCardHost(url: url, page: page)
+    }
+
+    func updateNSView(_ host: LinkCardHost, context: Context) {
+        host.show(url: url, page: page)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: LinkCardHost, context: Context) -> CGSize? {
+        guard let width = proposal.width, width.isFinite, width > 0 else { return nil }
+        return CGSize(width: width, height: LinkCardLayout.height(for: page, width: width))
+    }
+}
+
+/// `content` with the card of the first web address in `text` above it,
+/// once that page has arrived. Asks for the page a second after `text`
+/// last changed its first web address, and when the row appears.
+struct LinkCardAbove<Content: View>: View {
+    let text: String
+    let indent: CGFloat
+    let content: Content
+    @ObservedObject private var pages = LinkPageStore.shared
+
+    init(text: String, indent: CGFloat = 0, @ViewBuilder content: () -> Content) {
+        self.text = text
+        self.indent = indent
+        self.content = content()
+    }
+
+    var body: some View {
+        let url = LinkDetector.links(in: text).first?.url
+        VStack(alignment: .leading, spacing: LinkCardLayout.gap) {
+            if let url, let page = pages.page(for: url) {
+                LinkCardRow(url: url, page: page)
+                    .padding(.leading, indent)
+            }
+            content
         }
-        let size = NSSize(width: Self.width, height: height)
-        heightConstraint?.constant = height
-        preferredContentSize = size
-        onResize?(size)
+        .task(id: url) {
+            guard let url else { return }
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            pages.request(url)
+        }
     }
 }
 
@@ -1375,7 +1846,7 @@ final class LinkPreviewViewController: NSViewController {
 /// and color from the traits and the text appearance setting, so a font
 /// or size change keeps every style. AppKit rather than `TextEditor`,
 /// which shows no attributed text before macOS 26.
-final class NoteTextView: NSTextView, LinkHost {
+final class NoteTextView: NSTextView, LinkHost, NSTextContentStorageDelegate {
     static let styledTextType = NSPasteboard.PasteboardType("com.alvarezjorge.Notely.styled-text")
 
     var textAppearance: TextAppearance?
@@ -1386,6 +1857,18 @@ final class NoteTextView: NSTextView, LinkHost {
     private var renderedSize: Int?
     /// The web addresses shown as links, found again after every change.
     private var links: [DetectedLink] = []
+    /// Cards above paragraphs with links, in text order.
+    private var cardHosts: [LinkCardHost] = []
+    /// Asks for pages a second after typing stops.
+    private var requestTimer: Timer?
+    private var pagesObserver: Any?
+    private var cardLayoutPending = false
+    /// The room last laid out above each card paragraph, by paragraph start.
+    private var cardRooms: [Int: CGFloat] = [:]
+
+    deinit {
+        if let pagesObserver { NotificationCenter.default.removeObserver(pagesObserver) }
+    }
 
     // MARK: Styles
 
@@ -1424,6 +1907,8 @@ final class NoteTextView: NSTextView, LinkHost {
         restyle(fullRange)
         typingAttributes = displayAttributes(for: [])
         links = showLinks()
+        requestPages()
+        placeCards()
     }
 
     /// Restyles every character after a font or size change, keeping the
@@ -1437,6 +1922,7 @@ final class NoteTextView: NSTextView, LinkHost {
         restyle(fullRange)
         typingAttributes = displayAttributes(for: typing)
         links = showLinks()
+        placeCards()
         needsDisplay = true
     }
 
@@ -1526,7 +2012,180 @@ final class NoteTextView: NSTextView, LinkHost {
         super.didChangeText()
         // Typing, paste, cut, undo, and redo all end here.
         links = showLinks()
+        // Paragraphs moved; lay out every card paragraph's room again on
+        // the next relayout.
+        cardRooms = [:]
+        placeCards()
+        requestTimer?.invalidate()
+        requestTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: false) { [weak self] _ in
+            self?.requestPages()
+        }
         needsDisplay = true
+    }
+
+    // MARK: Link cards
+
+    /// Leaves room above paragraphs for their cards and places the cards
+    /// when pages arrive. Call once, before `load`.
+    func setUpLinkCards() {
+        textContentStorage?.delegate = self
+        pagesObserver = NotificationCenter.default.addObserver(forName: LinkPageStore.didLoad, object: nil,
+                                                               queue: .main) { [weak self] _ in
+            self?.relayoutCards()
+        }
+    }
+
+    /// Width of a card: the width of the text's lines. From the view's
+    /// own width, which a resize sets at once; the text container follows
+    /// it only on the next layout.
+    private var cardWidth: CGFloat {
+        let padding = textContainer?.lineFragmentPadding ?? 0
+        return max(bounds.width - 2 * textContainerInset.width - 2 * padding, 0)
+    }
+
+    /// Each paragraph that has a web address, with its first one, in text
+    /// order.
+    private var linkParagraphs: [(range: NSRange, url: URL)] {
+        let text = string as NSString
+        var result: [(range: NSRange, url: URL)] = []
+        for link in links {
+            let paragraph = text.paragraphRange(for: NSRange(location: link.range.location, length: 0))
+            if result.last?.range.location != paragraph.location {
+                result.append((paragraph, link.url))
+            }
+        }
+        return result
+    }
+
+    /// The card of the paragraph in `range`, once its page has arrived.
+    private func card(inParagraph range: NSRange) -> (url: URL, page: LinkPage)? {
+        let text = (string as NSString).substring(with: range)
+        guard let url = LinkDetector.links(in: text).first?.url,
+              let page = LinkPageStore.shared.page(for: url) else { return nil }
+        return (url, page)
+    }
+
+    private func requestPages() {
+        for paragraph in linkParagraphs {
+            LinkPageStore.shared.request(paragraph.url)
+        }
+    }
+
+    /// Lays out a paragraph that has a card with room for the card above
+    /// it. Only what TextKit lays out changes; the text storage, and so
+    /// the saved text, undo, and copy, never see the room.
+    func textContentStorage(_ textContentStorage: NSTextContentStorage,
+                            textParagraphWith range: NSRange) -> NSTextParagraph? {
+        guard range.length > 0, let storage = textStorage, NSMaxRange(range) <= storage.length,
+              let card = card(inParagraph: range) else { return nil }
+        let text = NSMutableAttributedString(attributedString: storage.attributedSubstring(from: range))
+        let current = text.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+        let style = (current ?? .default).mutableCopy() as! NSMutableParagraphStyle
+        style.paragraphSpacingBefore = LinkCardLayout.height(for: card.page, width: cardWidth) + LinkCardLayout.gap
+        text.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: text.length))
+        return NSTextParagraph(attributedString: text)
+    }
+
+    /// Asks TextKit for every paragraph again, so each gets the room its
+    /// card needs now: after a page arrives or the width changes. Marks
+    /// the text as edited without changing it, which registers no undo.
+    private func relayoutCards() {
+        guard textLayoutManager != nil, let storage = textStorage, storage.length > 0 else {
+            placeCards()
+            return
+        }
+        // The room each card paragraph needs now, by paragraph start.
+        var rooms: [Int: CGFloat] = [:]
+        for paragraph in linkParagraphs {
+            if let page = LinkPageStore.shared.page(for: paragraph.url) {
+                rooms[paragraph.range.location] = LinkCardLayout.height(for: page, width: cardWidth)
+            }
+        }
+        let changed = linkParagraphs.map(\.range).filter {
+            rooms[$0.location] != cardRooms[$0.location]
+        }
+        cardRooms = rooms
+        if !changed.isEmpty {
+            // Inside a transaction, so TextKit 2 asks for the paragraphs
+            // again at once instead of on some later event.
+            let edit = {
+                storage.beginEditing()
+                for range in changed where NSMaxRange(range) <= storage.length {
+                    storage.edited(.editedAttributes, range: range, changeInLength: 0)
+                }
+                storage.endEditing()
+            }
+            if let content = textContentStorage {
+                content.performEditingTransaction(edit)
+            } else {
+                edit()
+            }
+        }
+        // The cards are placed after the text view's own layout, which is
+        // the layout that is drawn.
+        needsLayout = true
+        needsDisplay = true
+    }
+
+    override func layout() {
+        super.layout()
+        placeCards()
+    }
+
+    /// Puts a card in the room above each paragraph whose page has
+    /// arrived, and removes cards whose paragraph lost its link.
+    private func placeCards() {
+        guard let layout = textLayoutManager else {
+            cardHosts.forEach { $0.removeFromSuperview() }
+            cardHosts = []
+            return
+        }
+        let cards = linkParagraphs.compactMap { paragraph in
+            LinkPageStore.shared.page(for: paragraph.url).map { (paragraph.range, paragraph.url, $0) }
+        }
+        if !cards.isEmpty {
+            layout.ensureLayout(for: layout.documentRange)
+        }
+        let width = cardWidth
+        let padding = textContainer?.lineFragmentPadding ?? 0
+        let origin = textContainerOrigin
+        var placed = 0
+        for (range, url, page) in cards {
+            guard let location = layout.location(layout.documentRange.location, offsetBy: range.location),
+                  let fragment = layout.textLayoutFragment(for: location) else { continue }
+            // The top of the paragraph's first line, below the room.
+            let lineTop = fragment.textLineFragments.first?.typographicBounds.minY ?? 0
+            let top = fragment.layoutFragmentFrame.minY + lineTop
+            let height = LinkCardLayout.height(for: page, width: width)
+            let frame = NSRect(x: origin.x + padding, y: origin.y + top - LinkCardLayout.gap - height,
+                               width: width, height: height)
+            let host: LinkCardHost
+            if placed < cardHosts.count {
+                host = cardHosts[placed]
+                host.show(url: url, page: page)
+            } else {
+                host = LinkCardHost(url: url, page: page)
+                addSubview(host)
+                cardHosts.append(host)
+            }
+            host.frame = frame
+            placed += 1
+        }
+        while cardHosts.count > placed {
+            cardHosts.removeLast().removeFromSuperview()
+        }
+    }
+
+    /// A new width wraps the text and the cards differently.
+    override func setFrameSize(_ newSize: NSSize) {
+        let widthChanged = newSize.width != frame.width
+        super.setFrameSize(newSize)
+        guard widthChanged, !cardLayoutPending else { return }
+        cardLayoutPending = true
+        DispatchQueue.main.async { [weak self] in
+            self?.cardLayoutPending = false
+            self?.relayoutCards()
+        }
     }
 
     // MARK: Links
@@ -1681,7 +2340,10 @@ struct NoteEditor: NSViewRepresentable {
         scrollView.scrollerStyle = .overlay
 
         let contentSize = scrollView.contentSize
-        let textView = NoteTextView(frame: NSRect(origin: .zero, size: contentSize))
+        // TextKit 2, asked for explicitly: link cards need its content
+        // storage and layout fragments.
+        let textView = NoteTextView(usingTextLayoutManager: true)
+        textView.frame = NSRect(origin: .zero, size: contentSize)
         textView.minSize = NSSize(width: 0, height: contentSize.height)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude)
         textView.isVerticallyResizable = true
@@ -1701,6 +2363,7 @@ struct NoteEditor: NSViewRepresentable {
         textView.textColor = .textColor
         textView.insertionPointColor = .textColor
         textView.textAppearance = appearance
+        textView.setUpLinkCards()
         let note = store.note(id)
         textView.load(text: note?.text ?? "", runs: note?.styles ?? [])
         textView.delegate = context.coordinator
@@ -2163,15 +2826,17 @@ struct ListView: View {
         GeometryReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 6) {
-                    ListField(text: store.note(id)?.title ?? "",
-                              placeholder: "Untitled list",
-                              font: appearance.nsFont(bold: true),
-                              isTitle: true,
-                              target: .title,
-                              focus: focus,
-                              onChange: { store.setTitle($0, for: id) },
-                              onCommand: { handle($0, at: .title) })
-                        .padding(.bottom, 2)
+                    LinkCardAbove(text: store.note(id)?.title ?? "") {
+                        ListField(text: store.note(id)?.title ?? "",
+                                  placeholder: "Untitled list",
+                                  font: appearance.nsFont(bold: true),
+                                  isTitle: true,
+                                  target: .title,
+                                  focus: focus,
+                                  onChange: { store.setTitle($0, for: id) },
+                                  onCommand: { handle($0, at: .title) })
+                    }
+                    .padding(.bottom, 2)
 
                     ForEach(rows) { row in
                         rowView(row)
@@ -2206,22 +2871,27 @@ struct ListView: View {
 
     @ViewBuilder
     private func rowView(_ row: ListRow) -> some View {
-        HStack(alignment: .top, spacing: 6) {
-            switch row {
-            case .item(let item):
-                CheckCircle(done: item.done) { toggle(item.id) }
-                ListField(text: item.text,
-                          placeholder: "",
-                          font: appearance.nsFont(bold: false),
-                          done: item.done,
-                          canToggle: true,
-                          target: .item(item.id),
-                          focus: focus,
-                          onChange: { store.setItemText($0, item: item.id, for: id) },
-                          onEndEditing: { removeIfEmpty(item.id) },
-                          onCommand: { handle($0, at: .item(item.id)) })
-                    .padding(.top, 3)
-            case .newItem:
+        switch row {
+        case .item(let item):
+            // The card lines up with the item's text, past the circle.
+            LinkCardAbove(text: item.text, indent: 24 + 6) {
+                HStack(alignment: .top, spacing: 6) {
+                    CheckCircle(done: item.done) { toggle(item.id) }
+                    ListField(text: item.text,
+                              placeholder: "",
+                              font: appearance.nsFont(bold: false),
+                              done: item.done,
+                              canToggle: true,
+                              target: .item(item.id),
+                              focus: focus,
+                              onChange: { store.setItemText($0, item: item.id, for: id) },
+                              onEndEditing: { removeIfEmpty(item.id) },
+                              onCommand: { handle($0, at: .item(item.id)) })
+                        .padding(.top, 3)
+                }
+            }
+        case .newItem:
+            HStack(alignment: .top, spacing: 6) {
                 // No circle: "New item" cannot be checked.
                 Color.clear.frame(width: 24, height: 24)
                 ListField(text: "",
