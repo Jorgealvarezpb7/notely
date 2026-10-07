@@ -20,6 +20,14 @@ dkc:
 _macos:
     @[ "$(uname)" = Darwin ] || { echo "error: run this recipe on the macOS host, not in the dkc container" >&2; exit 1; }
 
+# Runs the tests
+test:
+    swift test
+
+# Runs the NotelyCore tests on Linux in Docker, from the macOS host
+test-linux:
+    docker run --rm -v "$(pwd):/app" -w /app swift:6.0 swift test --scratch-path .build/linux
+
 # Builds .build/AppIcon.icns from Packaging/AppIcon.png at every standard size
 _icon: _macos
     #!/usr/bin/env bash
